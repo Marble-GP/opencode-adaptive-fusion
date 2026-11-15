@@ -1,0 +1,205 @@
+{
+  "fetchedAt": "2026-11-14T09:26:06.001Z",
+  "source": "OpenRouter model database API (https://openrouter.ai/api/v1/models) — benchmarks.artificial_analysis の intelligence_index / coding_index / agentic_index を正規化(÷100, クリップ)して算出。coding/debugging は coding_index、research/writing は intelligence_index、ops は agentic_index、review は (intelligence+agentic)/2 で近似。コーディング評価が null のモデルは intelligence_index で代用。",
+  "note": "下馬評はこのファイルの更新まで陳腐化します。観測が溜まるほど選定スコアでは実績が支配します(benchmarkPriorWeight の k 参照)。ベンチマーク不在のモデルは中立 0.5 扱いです。更新手順: OpenRouter API を再取得し、fetchedAt と各値を書き換えてください。なお2026-11-14 拡充分(15件)は coding_index/agentic_index が取得できず intelligence_index ÷100 で代用しました(既存 inkling-2-small 等と同じ代用規約)。ling-3.2-flash:free は近傍の Ling 3.1 Flash スコア、gpt-oss-120b は scored の high 変種、mistral-large-4-0 は high 変種に対応します。正確なカテゴリ別の指数が必要な場合は Artificial Analysis の各モデルページを参照して coding/ops を分離してください。",
+  "mapping": {
+    "coding": "artificial_analysis.coding_index → intelligence_index で代用",
+    "debugging": "artificial_analysis.coding_index → intelligence_index で代用",
+    "research": "artificial_analysis.intelligence_index",
+    "writing": "artificial_analysis.intelligence_index",
+    "ops": "artificial_analysis.agentic_index → 不在時は intelligence_index で代用",
+    "review": "(artificial_analysis.intelligence_index + agentic_index) / 2",
+    "expanded": "2026-11-14 拡充分: coding/debugging/ops/review も intelligence_index ÷100(AA 表で coding/agentic 未掲載のため)"
+  },
+  "models": {
+    "openrouter/thinkingmachines/inkling-2-small:free": {
+      "overall": 0.306,
+      "coding": 0.306,
+      "debugging": 0.306,
+      "research": 0.306,
+      "writing": 0.306,
+      "ops": 0.306,
+      "review": 0.306
+    },
+    "openrouter/z-ai/glm-5.3": {
+      "overall": 0.317,
+      "coding": 0.748,
+      "debugging": 0.748,
+      "research": 0.317,
+      "writing": 0.317,
+      "ops": 0.531,
+      "review": 0.424
+    },
+    "openrouter/z-ai/glm-5.3-flash": {
+      "overall": 0.278,
+      "coding": 0.715,
+      "debugging": 0.715,
+      "research": 0.278,
+      "writing": 0.278,
+      "ops": 0.509,
+      "review": 0.394
+    },
+    "opencode/glm-5.3-flash-free": {
+      "overall": 0.278,
+      "coding": 0.715,
+      "debugging": 0.715,
+      "research": 0.278,
+      "writing": 0.278,
+      "ops": 0.509,
+      "review": 0.394
+    },
+    "openrouter/google/gemma-4-31b-it:free": {
+      "overall": 0.044,
+      "coding": 0.434,
+      "debugging": 0.434,
+      "research": 0.044,
+      "writing": 0.044,
+      "ops": 0.042,
+      "review": 0.043
+    },
+    "openrouter/cohere/north-mini-code:free": {
+      "overall": 0.034,
+      "coding": 0.365,
+      "debugging": 0.365,
+      "research": 0.034,
+      "writing": 0.034,
+      "ops": 0.011,
+      "review": 0.023
+    },
+    "openrouter/deepseek/deepseek-v4.1-flash-1017": {
+      "overall": 0.33,
+      "coding": 0.33,
+      "debugging": 0.33,
+      "research": 0.33,
+      "writing": 0.33,
+      "ops": 0.33,
+      "review": 0.33
+    },
+    "openrouter/deepseek/deepseek-v4-pro-0813": {
+      "overall": 0.23,
+      "coding": 0.23,
+      "debugging": 0.23,
+      "research": 0.23,
+      "writing": 0.23,
+      "ops": 0.23,
+      "review": 0.23
+    },
+    "openrouter/xiaomi/mimo-v2.6-pro": {
+      "overall": 0.3,
+      "coding": 0.3,
+      "debugging": 0.3,
+      "research": 0.3,
+      "writing": 0.3,
+      "ops": 0.3,
+      "review": 0.3
+    },
+    "openrouter/xiaomi/mimo-v2.6-flash": {
+      "overall": 0.27,
+      "coding": 0.27,
+      "debugging": 0.27,
+      "research": 0.27,
+      "writing": 0.27,
+      "ops": 0.27,
+      "review": 0.27
+    },
+    "openrouter/minimax/minimax-m3.1-flash": {
+      "overall": 0.29,
+      "coding": 0.29,
+      "debugging": 0.29,
+      "research": 0.29,
+      "writing": 0.29,
+      "ops": 0.29,
+      "review": 0.29
+    },
+    "openrouter/minimax/minimax-m3": {
+      "overall": 0.19,
+      "coding": 0.19,
+      "debugging": 0.19,
+      "research": 0.19,
+      "writing": 0.19,
+      "ops": 0.19,
+      "review": 0.19
+    },
+    "openrouter/moonshotai/kimi-k3.1-pro": {
+      "overall": 0.46,
+      "coding": 0.46,
+      "debugging": 0.46,
+      "research": 0.46,
+      "writing": 0.46,
+      "ops": 0.46,
+      "review": 0.46
+    },
+    "openrouter/stepfun/step-5-preview": {
+      "overall": 0.29,
+      "coding": 0.29,
+      "debugging": 0.29,
+      "research": 0.29,
+      "writing": 0.29,
+      "ops": 0.29,
+      "review": 0.29
+    },
+    "openrouter/qwen/qwen3.8-max-0902": {
+      "overall": 0.34,
+      "coding": 0.34,
+      "debugging": 0.34,
+      "research": 0.34,
+      "writing": 0.34,
+      "ops": 0.34,
+      "review": 0.34
+    },
+    "openrouter/inclusionai/ling-3.2-flash:free": {
+      "overall": 0.3,
+      "coding": 0.3,
+      "debugging": 0.3,
+      "research": 0.3,
+      "writing": 0.3,
+      "ops": 0.3,
+      "review": 0.3
+    },
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "overall": 0.12,
+      "coding": 0.12,
+      "debugging": 0.12,
+      "research": 0.12,
+      "writing": 0.12,
+      "ops": 0.12,
+      "review": 0.12
+    },
+    "openrouter/nvidia/nemotron-3.5-lightning:free": {
+      "overall": 0.06,
+      "coding": 0.06,
+      "debugging": 0.06,
+      "research": 0.06,
+      "writing": 0.06,
+      "ops": 0.06,
+      "review": 0.06
+    },
+    "openrouter/nvidia/nemotron-3.5-super-vl:free": {
+      "overall": 0.14,
+      "coding": 0.14,
+      "debugging": 0.14,
+      "research": 0.14,
+      "writing": 0.14,
+      "ops": 0.14,
+      "review": 0.14
+    },
+    "openrouter/openai/gpt-oss-120b": {
+      "overall": 0.04,
+      "coding": 0.04,
+      "debugging": 0.04,
+      "research": 0.04,
+      "writing": 0.04,
+      "ops": 0.04,
+      "review": 0.04
+    },
+    "openrouter/mistralai/mistral-large-4-0": {
+      "overall": 0.26,
+      "coding": 0.26,
+      "debugging": 0.26,
+      "research": 0.26,
+      "writing": 0.26,
+      "ops": 0.26,
+      "review": 0.26
+    }
+  }
+}
