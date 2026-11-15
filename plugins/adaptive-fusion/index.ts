@@ -977,13 +977,20 @@ export default Plugin.define({
             ),
           ])
           const text = String(result?.text ?? "").trim()
-          if (text.length > 0) {
+          if (text === "OK") {
             // Verify success: proof the limit actually lifted, so clear the cooldown
             clearCooldown(ref)
             logRoute(`VERIFY ok ${ref} (cooldown cleared)`)
           } else {
+            // Anything other than an exact OK (empty, verbose, refusal) is not
+            // evidence of recovery: a model that cannot follow a trivial
+            // instruction stays cooled down.
             entry.until = Date.now() + QUOTA_COOLDOWN_MS
-            logRoute(`VERIFY empty ${ref} (cooldown +1h)`)
+            logRoute(
+              text.length === 0
+                ? `VERIFY empty ${ref} (cooldown +1h)`
+                : `VERIFY unexpected ${ref} "${text.slice(0, 20)}" (cooldown +1h)`,
+            )
           }
         } catch (error) {
           // Still unavailable: extend by 1 hour, keeping the verification state

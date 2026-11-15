@@ -19,7 +19,8 @@ rate limits, and continuously improves from HTTP outcomes and human/LLM reviews.
   token/cost/throughput statistics, and can review **older turns** after a bug surfaces.
 - **Shadow auto-review** — a separate lightweight model scores every response on four
   axes (instruction / accuracy / completeness / cost-efficiency) and enumerates what
-  the response actually accomplished.
+  the response actually accomplished. Displayed in the review panel; can optionally
+  feed the routing score behind gates (`autoReviewWeight`, default off).
 - **Topology awareness** — classifies orchestration shape (single / router /
   sequential-chain) and, with a Jev (TypeSafe) key, selects it probabilistically.
 - **Tier routing** — routes by task load (Light / Middle / Heavy) with upward cascading.
