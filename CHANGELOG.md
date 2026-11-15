@@ -2,80 +2,97 @@
 
 ## [0.9.0] - 2026-11-15
 
-レビュー機能拡張リリース。実機検証済み(OpenCode 2.3 / Windows)。
+Review-focused release. Verified live against OpenCode 2.3 on Windows.
 
-### 追加
-- **遡及レビュー(offset)**: `/fusion-review` で 0=最新, 1=1個前, 2=2個前…の応答を
-  対象にできる(パネル内の `[◀ 古い方へ]` / `[▶ 新しい方へ]` ナビにも対応)。
-  後からバグが見つかった応答を遡って評価・記録できる。RPC の `reviewInfo` /
-  `reviewSummary` / `reviewRate` に `offset`(number, 省略時 0)を追加
-- **ターン統計**: 応答1ターンあたりの入力/出力/推論/キャッシュ読みトークン、コスト($)、
-  実測所要時間、実測スループット(tok/s)を `/fusion-review` パネルに表示。
-  メッセージに記録された tokens/cost/time から算出するため過去ターンも後付けで表示可能
-- **自動審査の実績列挙(results)**: shadow 審査が「応答が実際に成し遂げた実績」を
-  証拠ベースで列挙(作成・変更ファイル / 実行コマンド / 提示した回答・数値など)。
-  抽象的感想は排除。`/fusion-review` パネルに「実績N: …」として表示
-- **コストパフォーマンス軸 efficiency(1〜5)**: 自動審査の第4軸。審査プロンプトに
-  ターン統計を渡し、トークン・時間あたりの成果を採点。`/fusion-review` に「コスパ x.x」
-  として表示
-- 採用トポロジー・ティア負荷帯・チェーン計画のパネル表示を改善(高さ44・折り返し抑制)
+### Added
+- **Localized UI (Japanese / English)**: every command title, dialog, toast and
+  statistics line follows a `lang` setting (`"ja"` / `"en"`). Choose the default per
+  installation with the `lang` plugin option, or switch at runtime with `/fusion-lang`
+  (persisted). The configured language also drives the summary and shadow auto-review
+  prompt wording.
+- **Retroactive review (`offset`)**: `/fusion-review` can target `0 = latest`,
+  `1 = one turn back`, `2 = two turns back`, … so older responses can be rated after a
+  bug surfaces. Navigate with `[◀ older]` / `[▶ newer]` inside the panel.
+  `reviewInfo` / `reviewSummary` / `reviewRate` RPC methods accept an optional
+  `offset` (number, default 0).
+- **Turn statistics**: per-turn input/output/reasoning/cache-read tokens, cost (USD),
+  measured latency and measured throughput (tok/s) in the review panel. Derived from
+  the tokens/cost/timestamps recorded on each message, so **past turns are computed
+  retroactively**.
+- **Results enumeration (`results`)**: shadow auto-review now lists what the response
+  actually accomplished (files created/changed, commands executed, answers and values
+  given) with evidence instead of generic praise. Displayed in the review panel.
+- **Cost-efficiency axis (`efficiency`, 1–5)**: fourth auto-review axis, judged with
+  the turn statistics in the prompt (tokens, latency, tok/s, cost).
+- Review panel layout: restored dialog height, prevented mid-word wrapping, added
+  topology and load-band display.
 
-### 変更
-- 自動審査プロンプトを4軸 + results 形式に再設計。JSON 抽出を括弧対応の厳密方式に
-  (複数行・results 配列を含む出力でも取りこぼさない)。旧3軸出力への後方互換パースは維持
-- `fusion/auto/*` の AutoReviewStat に `efficiency`/`efficiencyCount`/`results` を追加
-  (旧データは未収集として扱う)
+### Changed
+- Auto-review prompt redesigned for four axes + `results`. JSON extraction now uses
+  brace-balanced parsing so multi-line output with a `results` array is never truncated.
+  Legacy three-axis outputs still parse.
+- `AutoReviewStat` gains `efficiency`, `efficiencyCount` and `results` (old records are
+  treated as "not collected").
 
-### 互換性
-- RPC スキーマの新キーはすべて optional。旧バージョンの storage データ・出力と互換
+### Compatibility
+- All new RPC schema keys are optional; existing storage data and outputs remain
+  compatible.
 
 ## [0.8.1] - 2026-11-15
 
-ルーティング堅牢化リリース。実機検証・再現実験で確定した問題を修正。
+Robustness release. Fixes confirmed by live reproduction experiments.
 
-### 修正
-- OpenCode 2.3 の `experimental.model.resolve` は**同一プロバイダーへの書き換えのみ**
-  解決する(本体は `y.providerID === m.providerID` のときだけ resolve)。
-  異プロバイダーへの退避は `ctx.session.switchModel`(手動選択と同じ安全経路)で
-  次の dispatch から適用する **DEFER 経路**に変更(通常時は KEEP で書き換えしない)
-- **複数インスタンス(role=server 二重ロード)による `fusion/cooldowns` の
-  stale 上書き事故**を、kv をベースにメモリをマージする persist 方式に変更
-  (削除は tombstone、TTL 25h)。`/fusion-reset` 後の復活も防止
-- 未切替セッションは `session.model` が未設定のため事前rescueが働かなかった問題を、
-  resolve フックが実 dispatch モデルを `lastResolved` に記録し、
-  事前rescue(`PRE hint`)と step.failed の犯人特定のフォールバックに使用して修正
-  (健康モデルの誤冷却を防止)
-- TUI トグル⇔サーバー構成の再同期を prompt フックで実施(CONFIG synced ログ)
+### Fixed
+- OpenCode 2.3's `experimental.model.resolve` only resolves a rewrite **within the same
+  provider** (the core resolves only when `providerID` is unchanged). Cross-provider
+  moves now go through `ctx.session.switchModel` (the same path as manual model
+  selection) and apply from the next dispatch — the **DEFER path**. Ordinary routing
+  skips cross-provider rewrites (`KEEP`) to keep caches warm.
+- **Stale instance overwriting `fusion/cooldowns`** (OpenCode can load two `role=server`
+  plugin instances): persistence now **merges into the stored kv value** instead of
+  overwriting it, with tombstones (25 h TTL) so deletions stick and `/fusion-reset`
+  cannot be undone by a stale writer.
+- Pre-prompt rescue did nothing on sessions whose `session.model` was unset (new
+  sessions). The resolve hook now records the actually-dispatched model in
+  `lastResolved`, used as a fallback by pre-prompt rescue (`PRE hint`) and by
+  `step.failed` attribution — preventing a second consecutive failure on a dead default
+  model and preventing healthy models from being cooled down by mistake.
+- TUI toggle ↔ server re-sync on the `prompt` hook (`CONFIG synced` log).
 
-### 追加
-- **検証付き冷却**: 1時間タイマー満了は回復を意味しない。`needsVerify` 付きの冷却は
-  実機プローブ(`Reply with exactly: OK`)が成功するまで解除しない
-  (失敗時は更に1時間延長)
-- 成功時の冷却解除に `RECOVER ok <ref>` ログ、`after-fail` 失敗の logRoute 化、
-  ルーティングログを直近20件→200件に拡大
+### Added
+- **Verified cooldowns**: a 1-hour quota timer expiring does not mean recovery.
+  Cooldowns with `needsVerify` are lifted only after a live probe
+  (`Reply with exactly: OK`) succeeds; a failed probe extends the cooldown by another
+  hour.
+- `RECOVER ok <ref>` logging when a success clears a cooldown, `logRoute` for
+  `after-fail` failures, and the routing log history enlarged from 20 to 200 entries.
 
 ## [0.8.0] - 2026-11-14
 
-- **ティアルーティング**: タスク負荷(Light/Middle/Heavy)に応じてティア内から選択。
-  ティアはユーザー編成(manual)またはベンチマーク3分割(auto)。枯渇時は上方カスケード、
-  全滅時は従来選択に縮退。既定は off
+- **Tier routing**: candidates are selected within a tier for the task's load band
+  (Light/Middle/Heavy). Tiers are user-defined (`manual`) or benchmark-split (`auto`).
+  Depleted tiers cascade upward; a fully depleted set falls back to normal selection.
+  Disabled by default.
 
 ## [0.7a] - 2026-11-14
 
-- Jev(TypeSafe System One)によるタスク分類 + トポロジー判定(confidence<0.7 縮退)、
-  topologyScore ヒューリスティック縮退、D-4 topologyScore 加重合成
-- sequential-chain 補助実行(context フックで計画注入、既定は off)
-- 内部審査の2軸表示、トポロジー統計 `fusion/topology/*`
+- Jev (TypeSafe System One) task classification and topology choice
+  (confidence < 0.7 degrades), heuristic topology-score degradation, D-4 weighted
+  topology score composition.
+- Sequential-chain auxiliary execution (plan injected via the `context` hook, off by
+  default).
+- Two-axis review display; topology statistics in `fusion/topology/*`.
 
 ## [0.6] - 2026-11-14
 
-- **内部レビューハーネス(shadow mode)**: http.response(ok)の後に依頼文+応答を
-  別モデルが3軸採点し `fusion/auto/*` に蓄積(スコア未反映・表示のみ)。
-  `/fusion-reviewmodel` で審査モデルを指定可能
-- **ベンチマーク事前合成**: `data/benchmarks.json` を Beta 事前(`benchmarkPriorWeight`,
-  k=5 既定)として観測成功率を平滑化
+- **Shadow auto-review harness**: after a successful `http.response`, a separate model
+  scores the request/response pair on three axes and stores results in
+  `fusion/auto/*` (display only, not used for scoring). `reviewModel` selects the
+  reviewer.
+- **Benchmark priors**: `data/benchmarks.json` seeds a Beta prior
+  (`benchmarkPriorWeight`, default k = 5) that smooths observed success rates.
 
-## [0.5] - 初版
+## [0.5] - Initial release
 
-- 手動レビュー(応答の3行サマリー + 1〜5評価)とコスト上限
-  (ホワイトリスト空時の入力/出力トークンレート上限、既定 0=無料モデルのみ)
+- Manual review (three-line summary + 1–5 rating) and cost caps (input/output token
+  rate limits when the whitelist is empty; default 0 = free models only).

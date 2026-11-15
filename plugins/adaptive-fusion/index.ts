@@ -216,6 +216,9 @@ type FusionConfig = {
   // ティアごとのモデルグループ(ホワイトリストの強化版)。
   // 各層に複数の provider/model を設定でき、層内では既存の statScore+探索が働く。
   tiers: { heavy: string[]; middle: string[]; light: string[] }
+  // 表示言語(v0.9.0)。インストールごとに options.lang で選択でき、
+  // /fusion-lang でも切り替えられる。既定は ja。
+  lang: "ja" | "en"
 }
 
 // 負荷帯(タスク負荷・知能負荷の3段階)。diffculty score 0-100 を
@@ -351,7 +354,15 @@ export default Plugin.define({
         return raw === "manual" || raw === "auto" || raw === "off" ? raw : "off"
       })(),
       tiers: sanitizeTiers(ctx.options.tiers),
+      // 表示言語。opencode.json の options.lang でインストール単位に選択できる
+      // (保存済み設定 > options の優先順位は他項目と同じ)。
+      lang: ctx.options.lang === "en" ? "en" : "ja",
     }
+
+    // 表示言語ヘルパー(v0.9.0)。第1引数が日本語、第2引数が英語。
+    // 設定は TUI/RPC からも変更でき、即座に反映される。
+    const tr = (ja: string, en: string): string =>
+      cfg.lang === "en" ? en : ja
 
     // 保存済み設定の適用(検証済みの値のみ)。
     // setup 時の復元と、prompt フックでの再同期(TUI 側インスタンスが
@@ -420,6 +431,7 @@ export default Plugin.define({
         cfg.tierMode = s.tierMode
       if (s.tiers && typeof s.tiers === "object")
         cfg.tiers = sanitizeTiers(s.tiers)
+      if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
       if (Array.isArray(s.kinds) && s.kinds.every((k) => typeof k === "string")) {
         cfg.kinds.length = 0
         cfg.kinds.push(...(s.kinds as string[]))
@@ -1915,7 +1927,9 @@ export default Plugin.define({
       const compact = (value: string, max: number) =>
         value.replace(/\s+/g, " ").trim().slice(0, max)
       const fallback = (): string => {
-        const instructionLine = compact(instruction, 90) || "(指示文を取得できませんでした)"
+        const instructionLine =
+          compact(instruction, 90) ||
+          tr("(指示文を取得できませんでした)", "(could not read the instruction)")
         const resultLines = text
           .replace(/\s+/g, " ")
           .trim()
@@ -1924,19 +1938,37 @@ export default Plugin.define({
           .filter(Boolean)
         const result = compact(resultLines.slice(-2).join(" ") || text, 120)
         return [
-          `指示: ${instructionLine}`,
-          `実施: ${result}`,
-          `成果: ${result}`,
+          tr(`指示: ${instructionLine}`, `Instruction: ${instructionLine}`),
+          tr(`実施: ${result}`, `Work: ${result}`),
+          tr(`成果: ${result}`, `Outcome: ${result}`),
         ].join("\n")
       }
       if (text.length === 0) return fallback()
       const prompt = [
-        "以下はユーザー指示とアシスタントの応答です。",
-        "ユーザーには、次の3行の日本語だけを返してください。",
-        "1行目: 指示: 何を依頼されたか",
-        "2行目: 実施: どのような作業をしたか",
-        "3行目: 成果: 何を達成・改善したか",
-        "箇条書き記号、見出し、余分な前置きは禁止です。各行を簡潔にしてください。",
+        tr(
+          "以下はユーザー指示とアシスタントの応答です。",
+          "Below are the user instruction and the assistant response.",
+        ),
+        tr(
+          "ユーザーには、次の3行の日本語だけを返してください。",
+          "Return exactly three English lines to the user.",
+        ),
+        tr(
+          "1行目: 指示: 何を依頼されたか",
+          "Line 1: Instruction: what was requested",
+        ),
+        tr(
+          "2行目: 実施: どのような作業をしたか",
+          "Line 2: Work: what was actually done",
+        ),
+        tr(
+          "3行目: 成果: 何を達成・改善したか",
+          "Line 3: Outcome: what was achieved or improved",
+        ),
+        tr(
+          "箇条書き記号、見出し、余分な前置きは禁止です。各行を簡潔にしてください。",
+          "No bullet symbols, headings, or extra preamble. Keep each line concise.",
+        ),
         "Original user instruction:",
         instruction.slice(0, 4_000),
         "Assistant result:",
@@ -2264,9 +2296,18 @@ export default Plugin.define({
       text: string,
     ): Promise<{ plan: string; model: string; ms: number } | undefined> => {
       const prompt = [
-        "以下の指示を達成するための手順を3〜5行で列挙してください。",
-        "工程の順序依存と検証方法を明示してください。",
-        "前置き・見出し・整形は不要で、手順の行だけを返してください。",
+        tr(
+          "以下の指示を達成するための手順を3〜5行で列挙してください。",
+          "List the steps needed to accomplish the instruction below in 3 to 5 lines.",
+        ),
+        tr(
+          "工程の順序依存と検証方法を明示してください。",
+          "Make ordering dependencies and the verification method explicit.",
+        ),
+        tr(
+          "前置き・見出し・整形は不要で、手順の行だけを返してください。",
+          "No preamble, headings, or formatting — return only the step lines.",
+        ),
         "---",
         text.slice(0, 1_000),
       ].join("\n")
@@ -2369,23 +2410,50 @@ export default Plugin.define({
         const t = target.turn
         const statsLine = t
           ? [
-              "--- ターン統計(参考) ---",
-              `モデル: ${target.providerID}/${target.modelID} / 入力 ${t.inputTokens} tok (cache読み ${t.cacheRead}) / 出力 ${t.outputTokens} tok / 実測 ${(t.durationMs / 1000).toFixed(1)}s / ${t.tps > 0 ? t.tps.toFixed(1) + " tok/s" : "速度不明"} / コスト $${t.cost.toFixed(6)}`,
+              tr(
+                "--- ターン統計(参考) ---",
+                "--- turn statistics (reference) ---",
+              ),
+              tr(
+                `モデル: ${target.providerID}/${target.modelID} / 入力 ${t.inputTokens} tok (cache読み ${t.cacheRead}) / 出力 ${t.outputTokens} tok / 実測 ${(t.durationMs / 1000).toFixed(1)}s / ${t.tps > 0 ? t.tps.toFixed(1) + " tok/s" : "速度不明"} / コスト $${t.cost.toFixed(6)}`,
+                `model: ${target.providerID}/${target.modelID} / input ${t.inputTokens} tok (cache read ${t.cacheRead}) / output ${t.outputTokens} tok / measured ${(t.durationMs / 1000).toFixed(1)}s / ${t.tps > 0 ? t.tps.toFixed(1) + " tok/s" : "throughput unknown"} / cost $${t.cost.toFixed(6)}`,
+              ),
             ]
           : []
         const prompt = [
-          "以下はユーザー指示とアシスタント応答のペアを評価してください。",
-          "4つの軸を1〜5の整数で採点します。",
-          "instruction = 依頼を正しく理解し意図に応えたか(5=完全に応えた / 3=部分的 / 1=答えず)",
-          "accuracy = 内容は正確か(5=正確かつ根拠あり / 3=概ね正しいが要修正 / 1=誤りが多い)",
-          "completeness = 必要な作業をやり切ったか(5=完遂 / 3=途中まで / 1=未着手)",
-          "efficiency = コストパフォーマンス(消費トークン・時間に対する成果)(5=最小の労力で完遂 / 3=やや冗長または低速 / 1=資源を浪費した割に成果が薄い)",
-          "reason は日本語で1行。",
-          'results は「応答が実際に成し遂げた実績」を列挙してください(日本語、各項目1行)。具体的な証拠ベースで: 作成・変更したファイル、実行したコマンド、提示した回答・数値など。抽象的な感想(丁寧だった等)は実績に含めない。実績を確認できない場合は ["実績なし"] のみ。',
-          '必ずJSONのみを返す: {"instruction":n,"accuracy":n,"completeness":n,"efficiency":n,"results":["..."],"reason":"..."}',
-          "--- ユーザー指示 ---",
+          tr(
+            "以下はユーザー指示とアシスタント応答のペアを評価してください。",
+            "Evaluate the following user-instruction / assistant-response pair.",
+          ),
+          tr(
+            "4つの軸を1〜5の整数で採点します。",
+            "Score four axes as integers from 1 to 5.",
+          ),
+          tr(
+            "instruction = 依頼を正しく理解し意図に応えたか(5=完全に応えた / 3=部分的 / 1=答えず)",
+            "instruction = understood the request and served its intent (5 = fully met / 3 = partial / 1 = did not answer)",
+          ),
+          tr(
+            "accuracy = 内容は正確か(5=正確かつ根拠あり / 3=概ね正しいが要修正 / 1=誤りが多い)",
+            "accuracy = is the content correct (5 = correct with evidence / 3 = mostly right but needs fixes / 1 = many errors)",
+          ),
+          tr(
+            "completeness = 必要な作業をやり切ったか(5=完遂 / 3=途中まで / 1=未着手)",
+            "completeness = finished the required work (5 = complete / 3 = partial / 1 = not started)",
+          ),
+          tr(
+            "efficiency = コストパフォーマンス(消費トークン・時間に対する成果)(5=最小の労力で完遂 / 3=やや冗長または低速 / 1=資源を浪費した割に成果が薄い)",
+            "efficiency = cost-performance (outcome per token and per second) (5 = done with minimal effort / 3 = somewhat verbose or slow / 1 = wasted resources with little outcome)",
+          ),
+          tr("reason は日本語で1行。", "Write reason as a single English line."),
+          tr(
+            'results は「応答が実際に成し遂げた実績」を列挙してください(日本語、各項目1行)。具体的な証拠ベースで: 作成・変更したファイル、実行したコマンド、提示した回答・数値など。抽象的な感想(丁寧だった等)は実績に含めない。実績を確認できない場合は ["実績なし"] のみ。',
+            'results must enumerate what the response actually accomplished (English, one item per line), evidence-based: files created or changed, commands executed, answers and values given. Do not include vague impressions (such as "was polite"). If nothing can be verified, use ["no verified results"] only.',
+          ),
+          'Return JSON only: {"instruction":n,"accuracy":n,"completeness":n,"efficiency":n,"results":["..."],"reason":"..."}',
+          tr("--- ユーザー指示 ---", "--- user instruction ---"),
           target.instruction.slice(0, 4_000),
-          "--- アシスタント応答 ---",
+          tr("--- アシスタント応答 ---", "--- assistant response ---"),
           target.text.slice(0, 4_000),
           ...statsLine,
         ].join("\n")
@@ -3126,7 +3194,7 @@ export default Plugin.define({
           providerID: "",
           modelID: "",
           assignedAt: "",
-          preview: "(応答なし)",
+          preview: tr("(応答なし)", "(no response)"),
           instructionPreview: "",
           responseLength: 0,
           feedbackAverage: 0,
@@ -3171,12 +3239,12 @@ export default Plugin.define({
       return {
         sessionID,
         offset,
-        category: target.category || "(未分類)",
+        category: target.category || tr("(未分類)", "(unclassified)"),
         messageID: target.messageID,
         providerID: target.providerID,
         modelID: target.modelID,
         assignedAt: target.assignedAt,
-        preview: target.preview || "(空の応答)",
+        preview: target.preview || tr("(空の応答)", "(empty response)"),
         instructionPreview: target.instructionPreview,
         responseLength: target.text.length,
         feedbackAverage: count > 0 ? (feedback?.ratingSum ?? 0) / count : 0,
@@ -3202,8 +3270,14 @@ export default Plugin.define({
       const target = await getReviewTarget(sessionID, offset)
       if (!target || target.text.length === 0)
         return offset > 0
-          ? `${offset}個前の応答は評価できる内容がありません`
-          : "まだ評価できる応答がありません"
+          ? tr(
+              `${offset}個前の応答は評価できる内容がありません`,
+              `The response ${offset} turn(s) back has no rateable content.`,
+            )
+          : tr(
+              "まだ評価できる応答がありません",
+              "There is no rateable response yet.",
+            )
       return summarizeAssistant(target.instruction, target.text)
     }
 
@@ -3249,18 +3323,39 @@ export default Plugin.define({
         topologyQualityAverage: 0,
       })
       if (!hasRating && !hasTopologyRating)
-        return fail("rating または topologyRating のどちらかを指定してください")
+        return fail(
+          tr(
+            "rating または topologyRating のどちらかを指定してください",
+            "Specify either rating or topologyRating.",
+          ),
+        )
       if (hasRating && (!Number.isInteger(rating) || rating! < 1 || rating! > 5))
-        return fail("rating は 1〜5 の整数で入力してください")
+        return fail(
+          tr(
+            "rating は 1〜5 の整数で入力してください",
+            "rating must be an integer from 1 to 5.",
+          ),
+        )
       if (hasTopologyRating &&
           (!Number.isInteger(topologyRating) || topologyRating! < 1 || topologyRating! > 5))
-        return fail("topologyRating は 1〜5 の整数で入力してください")
+        return fail(
+          tr(
+            "topologyRating は 1〜5 の整数で入力してください",
+            "topologyRating must be an integer from 1 to 5.",
+          ),
+        )
       const target = await getReviewTarget(sessionID, offset)
       if (!target)
         return fail(
           offset > 0
-            ? `${offset}個前の応答が見つかりません`
-            : "最新応答が見つかりません",
+            ? tr(
+                `${offset}個前の応答が見つかりません`,
+                `No response found ${offset} turn(s) back.`,
+              )
+            : tr(
+                "最新応答が見つかりません",
+                "No response found.",
+              ),
         )
       if (hasRating) {
         await recordFeedback(
@@ -3279,15 +3374,23 @@ export default Plugin.define({
       const count = global?.count ?? 0
       const topologyInfo = await topologySnapshot(sessionID)
       const parts = [
-        hasRating ? `評価を記録しました: ${rating}/5` : undefined,
+        hasRating
+          ? tr(
+              `評価を記録しました: ${rating}/5`,
+              `Rating recorded: ${rating}/5`,
+            )
+          : undefined,
         hasTopologyRating
-          ? `トポロジーコスパを記録しました: ${topologyRating}/5 (${topologyInfo.topology})`
+          ? tr(
+              `トポロジーコスパを記録しました: ${topologyRating}/5 (${topologyInfo.topology})`,
+              `Topology cost-performance recorded: ${topologyRating}/5 (${topologyInfo.topology})`,
+            )
           : undefined,
       ].filter(Boolean) as string[]
       return {
         ok: true,
         message: parts.join(" / "),
-        category: target.category || "(未分類)",
+        category: target.category || tr("(未分類)", "(unclassified)"),
         providerID: target.providerID,
         modelID: target.modelID,
         feedbackAverage: count > 0 ? (global?.ratingSum ?? 0) / count : 0,
@@ -3364,9 +3467,16 @@ export default Plugin.define({
       const all = await candidates()
       const capped = all.length > PROBE_LIMIT
       const targets = all.slice(0, PROBE_LIMIT)
-      if (targets.length === 0) return "(プローブ対象のモデルがありません)"
+      if (targets.length === 0)
+        return tr(
+          "(プローブ対象のモデルがありません)",
+          "(no models to probe)",
+        )
       const lines = [
-        `プローブ対象: ${targets.length} 件${capped ? `(候補${all.length} 件から先頭のみ)` : ""}`,
+        tr(
+          `プローブ対象: ${targets.length} 件${capped ? `(候補${all.length} 件から先頭のみ)` : ""}`,
+          `Probing ${targets.length} model(s)${capped ? ` (first ${targets.length} of ${all.length} candidates)` : ""}`,
+        ),
         "",
       ]
       const results = await runPool(targets, probeOne, PROBE_CONCURRENCY)
@@ -3403,7 +3513,13 @@ export default Plugin.define({
           lines.push(`FAIL      ${ref}  (${r.note}) [${cls}]`)
         }
       }
-      lines.push("", `結果: ok ${okCount} / fail ${results.length - okCount}`)
+      lines.push(
+        "",
+        tr(
+          `結果: ok ${okCount} / fail ${results.length - okCount}`,
+          `Result: ok ${okCount} / fail ${results.length - okCount}`,
+        ),
+      )
       return lines.join("\n")
     }
 
@@ -3413,47 +3529,95 @@ export default Plugin.define({
     const buildStatsText = async (): Promise<string> => {
       const lines: string[] = []
       lines.push(
-        `(コスト上限: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
-          `${cfg.models.length === 0 ? " — ホワイトリスト空時に適用" : " (ホワイトリスト優先)"})`,
+        tr(
+          `(コスト上限: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
+            `${cfg.models.length === 0 ? " — ホワイトリスト空時に適用" : " (ホワイトリスト優先)"})`,
+          `(cost cap: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
+            `${cfg.models.length === 0 ? " — applied when the whitelist is empty" : " (whitelist takes precedence)"})`,
+        ),
       )
-      if (!cfg.enabled) lines.push("(ルーティング: OFF / 観測のみ)")
+      if (!cfg.enabled)
+        lines.push(tr("(ルーティング: OFF / 観測のみ)", "(routing: OFF / observing only)"))
       if (cfg.crossProvider)
-        lines.push("(モード: crossProvider / 全プロバイダー混合)")
-      else lines.push(`(モード: 単一プロバイダー ${cfg.providerID})`)
+        lines.push(
+          tr(
+            "(モード: crossProvider / 全プロバイダー混合)",
+            "(mode: crossProvider / all providers mixed)",
+          ),
+        )
+      else
+        lines.push(
+          tr(
+            `(モード: 単一プロバイダー ${cfg.providerID})`,
+            `(mode: single provider ${cfg.providerID})`,
+          ),
+        )
       {
         const benchmarks = loadBenchmarks()
         const k = benchmarkPriorK(benchmarks)
         if (cfg.benchmarkPriorWeight <= 0) {
-          lines.push("(ベンチマーク事前: 無効 / k=0)")
+          lines.push(
+            tr(
+              "(ベンチマーク事前: 無効 / k=0)",
+              "(benchmark prior: disabled / k=0)",
+            ),
+          )
         } else if (!benchmarks) {
           lines.push(
-            "(ベンチマーク事前: ファイルが読めません。全モデル中立 0.5 扱い)",
+            tr(
+              "(ベンチマーク事前: ファイルが読めません。全モデル中立 0.5 扱い)",
+              "(benchmark prior: file unreadable. All models treated as neutral 0.5)",
+            ),
           )
         } else {
           const ts = Date.parse(benchmarks.fetchedAt ?? "")
           const stale =
             Number.isFinite(ts) && Date.now() - ts > 90 * 24 * 60 * 60_000
           lines.push(
-            `(ベンチマーク事前: 有効 k=${k} / モデル数 ${Object.keys(benchmarks.models ?? {}).length}` +
-              ` / fetchedAt ${(benchmarks.fetchedAt ?? "不明").slice(0, 10)}${stale ? " / 90日経過: kを半減(陳腐化対策)" : ""})`,
+            tr(
+              `(ベンチマーク事前: 有効 k=${k} / モデル数 ${Object.keys(benchmarks.models ?? {}).length}` +
+                ` / fetchedAt ${(benchmarks.fetchedAt ?? "不明").slice(0, 10)}${stale ? " / 90日経過: kを半減(陳腐化対策)" : ""})`,
+              `(benchmark prior: active k=${k} / models ${Object.keys(benchmarks.models ?? {}).length}` +
+                ` / fetchedAt ${(benchmarks.fetchedAt ?? "unknown").slice(0, 10)}${stale ? " / older than 90 days: k halved (staleness guard)" : ""})`,
+            ),
           )
         }
       }
       // Jev の利用可否とトポロジー判定の状態
       if (cfg.jevMode === "off") {
-        lines.push("(Jev: OFF / jevMode=off — 従来経路で動作)")
+        lines.push(
+          tr(
+            "(Jev: OFF / jevMode=off — 従来経路で動作)",
+            "(Jev: OFF / jevMode=off — using the legacy path)",
+          ),
+        )
       } else if (jevAvailable()) {
         lines.push(
-          `(Jev: 利用可能 / ${process.env.TYPESAFE_API_KEY?.trim() ? "環境変数" : "登録キー"}で認証` +
-            ` — 分類・トポロジー判定を Jev で実行)`,
+          tr(
+            `(Jev: 利用可能 / ${process.env.TYPESAFE_API_KEY?.trim() ? "環境変数" : "登録キー"}で認証` +
+              ` — 分類・トポロジー判定を Jev で実行)`,
+            `(Jev: available / authenticated via ${process.env.TYPESAFE_API_KEY?.trim() ? "environment variable" : "stored key"}` +
+              ` — classification and topology decisions run on Jev)`,
+          ),
         )
       } else {
-        lines.push("(Jev: キー未登録 — 従来経路で動作 / /fusion-jev-key で登録)")
+        lines.push(
+          tr(
+            "(Jev: キー未登録 — 従来経路で動作 / /fusion-jev-key で登録)",
+            "(Jev: no key — using the legacy path / register with /fusion-jev-key)",
+          ),
+        )
       }
       lines.push(
         cfg.topologyMode === "fixed"
-          ? "(トポロジー: fixed / single 固定)"
-          : `(トポロジー: auto / 許可: ${cfg.allowedTopologies.join(", ")} / 補助呼出上限 ${cfg.maxTopologyCalls})`,
+          ? tr(
+              "(トポロジー: fixed / single 固定)",
+              "(topology: fixed / always single)",
+            )
+          : tr(
+              `(トポロジー: auto / 許可: ${cfg.allowedTopologies.join(", ")} / 補助呼出上限 ${cfg.maxTopologyCalls})`,
+              `(topology: auto / allowed: ${cfg.allowedTopologies.join(", ")} / aux call limit ${cfg.maxTopologyCalls})`,
+            ),
       )
 
       const all = await candidates()
@@ -3465,7 +3629,10 @@ export default Plugin.define({
       }
       if (cold.length > 0)
         lines.push(
-          `(学習期間: 探索率 ${Math.round(cfg.learningRate * 100)}% / 未熟モデル ${cold.length} 件)`,
+          tr(
+            `(学習期間: 探索率 ${Math.round(cfg.learningRate * 100)}% / 未熟モデル ${cold.length} 件)`,
+            `(learning phase: explore rate ${Math.round(cfg.learningRate * 100)}% / ${cold.length} under-sampled model(s))`,
+          ),
         )
 
       const cooled = [...cooldowns.entries()]
@@ -3476,33 +3643,45 @@ export default Plugin.define({
       )
       if (cooledProviders.length > 0)
         lines.push(
-          `(プロバイダー冷却: ${cooledProviders.length} 件 — 無料枠はアカウント単位で全滅)`,
+          tr(
+            `(プロバイダー冷却: ${cooledProviders.length} 件 — 無料枠はアカウント単位で全滅)`,
+            `(provider cooldowns: ${cooledProviders.length} — free tiers fail account-wide)`,
+          ),
           ...cooledProviders.map(
             ([id, p]) =>
-              `- ${id}: ${p.quota ? "クオータ制限" : "エラー"} / 残り ${Math.max(0, Math.round((p.until - Date.now()) / 1000))}s`,
+              `- ${id}: ${p.quota ? tr("クオータ制限", "quota limited") : tr("エラー", "error")} / ${tr("残り", "remaining")} ${Math.max(0, Math.round((p.until - Date.now()) / 1000))}s`,
           ),
         )
       if (cooled.length > 0)
         lines.push(
-          `(クールダウン: ${cooled.length} 件)`,
+          tr(
+            `(クールダウン: ${cooled.length} 件)`,
+            `(cooldowns: ${cooled.length})`,
+          ),
           ...cooled.map(
             ([ref, c]) =>
               `- ${ref}: ${
                 c.until <= Date.now() && c.needsVerify
-                  ? "検証待ち(制限の再確認中 — 1hごとに再プローブ)"
+                  ? tr(
+                      "検証待ち(制限の再確認中 — 1hごとに再プローブ)",
+                      "awaiting verification (re-checking the limit — reprobe every hour)",
+                    )
                   : c.quota
-                    ? "クオータ制限"
-                    : `失敗${c.failures} 回`
+                    ? tr("クオータ制限", "quota limited")
+                    : tr(`失敗${c.failures} 回`, `${c.failures} failure(s)`)
               } / ${
                 c.until > Date.now()
-                  ? `残り ${Math.max(0, Math.round((c.until - Date.now()) / 1000))}s`
-                  : "再検証待ち"
+                  ? tr(
+                      `残り ${Math.max(0, Math.round((c.until - Date.now()) / 1000))}s`,
+                      `remaining ${Math.max(0, Math.round((c.until - Date.now()) / 1000))}s`,
+                    )
+                  : tr("再検証待ち", "awaiting reprobe")
               }`,
           ),
         )
 
       const page = await ctx.storage.scan({ prefix: STAT_PREFIX, limit: 100 })
-      lines.push("全体統計")
+      lines.push(tr("全体統計", "Overall statistics"))
       for (const entry of page.entries) {
         const stat = entry.value as Stat
         const n = stat.success + stat.failure
@@ -3512,7 +3691,8 @@ export default Plugin.define({
           `- ${refFor(stat.model.providerID, stat.model.id)}: ${n} req / ok ${rate}% / avg ${avg} ms`,
         )
       }
-      if (page.entries.length === 0) lines.push("(データなし)")
+      if (page.entries.length === 0)
+        lines.push(tr("(データなし)", "(no data)"))
 
       const feedbackPage = await ctx.storage.scan({
         prefix: FEEDBACK_PREFIX,
@@ -3522,12 +3702,12 @@ export default Plugin.define({
         (entry) => !entry.key.startsWith(TASK_FEEDBACK_PREFIX),
       )
       if (globalFeedbackEntries.length > 0) {
-        lines.push("人間評価:")
+        lines.push(tr("人間評価:", "Human ratings:"))
         for (const entry of globalFeedbackEntries) {
           const stat = entry.value as FeedbackStat
           const avg = stat.count > 0 ? (stat.ratingSum / stat.count).toFixed(1) : "-"
           lines.push(
-            `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg}/5 (${stat.count} 件)`,
+            `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg}/5 (${stat.count} ${tr("件", "entries")})`,
           )
         }
       }
@@ -3543,7 +3723,7 @@ export default Plugin.define({
       const autoAvgByRef = new Map<string, number>()
       const reviewerAgg = new Map<string, { total: number; sum: number }>()
       if (globalAutoEntries.length > 0) {
-        lines.push("内部審査(shadow):")
+        lines.push(tr("内部審査(shadow):", "Auto-review (shadow):"))
         for (const entry of globalAutoEntries) {
           const stat = entry.value as AutoReviewStat
           const n = Math.max(stat.total, 1)
@@ -3560,21 +3740,28 @@ export default Plugin.define({
             reviewerAgg.set(stat.reviewerRef, agg)
           }
           lines.push(
-            `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg.toFixed(2)}/5 (${stat.total} 件, reviewer ${stat.reviewerRef ?? "-"})`,
+            `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg.toFixed(2)}/5 (${stat.total} ${tr("件", "entries")}, reviewer ${stat.reviewerRef ?? "-"})`,
           )
         }
         // 審査モデル別の分布(自己採点バイアス検出用、リスク2)
         if (reviewerAgg.size > 1) {
-          lines.push("審査モデル別(shadow):")
+          lines.push(tr("審査モデル別(shadow):", "By reviewer model (shadow):"))
           for (const [reviewer, agg] of reviewerAgg) {
             const avg = agg.sum / Math.max(agg.total * 3, 1)
-            lines.push(`- reviewer ${reviewer}: ${avg.toFixed(2)}/5 (${agg.total} 件)`)
+            lines.push(
+              `- reviewer ${reviewer}: ${avg.toFixed(2)}/5 (${agg.total} ${tr("件", "entries")})`,
+            )
           }
         }
         // skip 記録(A-2): 審査できなかった事実
         const skip = await loadAutoSkip()
         if (skip && skip.total > 0) {
-          lines.push(`内部審査スキップ: ${skip.total} 件`)
+          lines.push(
+            tr(
+              `内部審査スキップ: ${skip.total} 件`,
+              `Auto-review skips: ${skip.total}`,
+            ),
+          )
           for (const r of skip.recent) {
             lines.push(`- ${r.at} ${r.reviewerRef} (${r.reason})`)
           }
@@ -3591,11 +3778,20 @@ export default Plugin.define({
           const delta = autoAvg - humanAvg
           const flag = Math.abs(delta) >= 1.0 ? " ⚠" : ""
           divergences.push(
-            `- ${ref}: shadow ${autoAvg.toFixed(2)} vs 人間 ${humanAvg.toFixed(2)} (差 ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})${flag}`,
+            tr(
+              `- ${ref}: shadow ${autoAvg.toFixed(2)} vs 人間 ${humanAvg.toFixed(2)} (差 ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})${flag}`,
+              `- ${ref}: shadow ${autoAvg.toFixed(2)} vs human ${humanAvg.toFixed(2)} (delta ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})${flag}`,
+            ),
           )
         }
         if (divergences.length > 0) {
-          lines.push("乖離(shadow − 人間、|差|≥1.0 は要確認):", ...divergences)
+          lines.push(
+            tr(
+              "乖離(shadow − 人間、|差|≥1.0 は要確認):",
+              "Divergence (shadow − human, |delta| ≥ 1.0 needs review):",
+            ),
+            ...divergences,
+          )
         }
       }
 
@@ -3609,12 +3805,21 @@ export default Plugin.define({
       )
       if (topologyEntries.length > 0) {
         lines.push(
-          `(トポロジー選定スコア重み: Jev事前 w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (キー無しのため w1=0 運用)"} / コスパ w2=${cfg.topologyWeightHumanCP} / 自動観測 w3=${cfg.topologyWeightAuto})`,
+          tr(
+            `(トポロジー選定スコア重み: Jev事前 w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (キー無しのため w1=0 運用)"} / コスパ w2=${cfg.topologyWeightHumanCP} / 自動観測 w3=${cfg.topologyWeightAuto})`,
+            `(topology score weights: Jev prior w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (no key, so w1=0)"} / cost-performance w2=${cfg.topologyWeightHumanCP} / auto observation w3=${cfg.topologyWeightAuto})`,
+          ),
         )
         lines.push(
           cfg.chainMode === "active"
-            ? "(chain 実行: active — sequential-chain 選択時に planner を実行し計画を system 参照として注入)"
-            : "(chain 実行: off — 判定と記録のみ / /fusion-chainmode で切替)",
+            ? tr(
+                "(chain 実行: active — sequential-chain 選択時に planner を実行し計画を system 参照として注入)",
+                "(chain execution: active — when sequential-chain is chosen, a planner runs and its plan is injected as system reference)",
+              )
+            : tr(
+                "(chain 実行: off — 判定と記録のみ / /fusion-chainmode で切替)",
+                "(chain execution: off — decision and recording only / toggle with /fusion-chainmode)",
+              ),
         )
         // ティアルーティング(v0.8): モードと層ごとの集計を表示する。
         // 集計はティア構成メンバーの全体統計を合算した導出値(追加の保存なし)
@@ -3622,11 +3827,17 @@ export default Plugin.define({
           const tiers = resolveTiers()
           if (!tiers) {
             lines.push(
-              `(ティア: mode=${cfg.tierMode} — 導出不可(auto はベンチマーク3件以上が必要)/ 従来選択で動作)`,
+              tr(
+                `(ティア: mode=${cfg.tierMode} — 導出不可(auto はベンチマーク3件以上が必要)/ 従来選択で動作)`,
+                `(tiers: mode=${cfg.tierMode} — cannot derive (auto needs at least 3 benchmarks) / using legacy selection)`,
+              ),
             )
           } else {
             lines.push(
-              `(ティア: mode=${cfg.tierMode} / 負荷帯 Light/Middle/Heavy → 該当層から上方カスケード)`,
+              tr(
+                `(ティア: mode=${cfg.tierMode} / 負荷帯 Light/Middle/Heavy → 該当層から上方カスケード)`,
+                `(tiers: mode=${cfg.tierMode} / load band Light/Middle/Heavy → cascade upward from the matching tier)`,
+              ),
             )
             const tierLines: string[] = []
             for (const tier of TIER_NAMES) {
@@ -3649,15 +3860,23 @@ export default Plugin.define({
               const okPct = n > 0 ? Math.round((success / n) * 100) : 0
               const avgMs = n > 0 ? Math.round(totalMs / n) : 0
               tierLines.push(
-                `- ${tier}: ${tiers[tier].length} モデル (${tiers[tier].join(", ") || "空"}) / ${n} req / ok ${okPct}% / avg ${avgMs} ms`,
+                tr(
+                  `- ${tier}: ${tiers[tier].length} モデル (${tiers[tier].join(", ") || "空"}) / ${n} req / ok ${okPct}% / avg ${avgMs} ms`,
+                  `- ${tier}: ${tiers[tier].length} model(s) (${tiers[tier].join(", ") || "empty"}) / ${n} req / ok ${okPct}% / avg ${avgMs} ms`,
+                ),
               )
             }
-            lines.push("ティア別集計:", ...tierLines)
+            lines.push(tr("ティア別集計:", "Per-tier totals:"), ...tierLines)
           }
         } else {
-          lines.push("(ティア: off — 全候補から選択 / /fusion-tiermode で切替)")
+          lines.push(
+            tr(
+              "(ティア: off — 全候補から選択 / /fusion-tiermode で切替)",
+              "(tiers: off — selecting from all candidates / toggle with /fusion-tiermode)",
+            ),
+          )
         }
-        lines.push("トポロジー(観測):")
+        lines.push(tr("トポロジー(観測):", "Topologies (observed):"))
         for (const entry of topologyEntries) {
           const stat = entry.value as TopologyStat
           if (stat.count <= 0) continue
@@ -3667,16 +3886,28 @@ export default Plugin.define({
             ? `quality ${(stat.sumQuality / stat.qualityCount).toFixed(2)}/5 (${stat.qualityCount})`
             : "quality -"
           const cp = stat.costPerformanceCount > 0
-            ? `コスパ ${(stat.sumCostPerformance / stat.costPerformanceCount).toFixed(2)}/5 (${stat.costPerformanceCount})`
-            : "コスパ -"
+            ? tr(
+                `コスパ ${(stat.sumCostPerformance / stat.costPerformanceCount).toFixed(2)}/5 (${stat.costPerformanceCount})`,
+                `cost-perf ${(stat.sumCostPerformance / stat.costPerformanceCount).toFixed(2)}/5 (${stat.costPerformanceCount})`,
+              )
+            : tr("コスパ -", "cost-perf -")
           const prior = stat.jevPriorCount > 0
-            ? `jev事前 ${(stat.sumJevPrior / stat.jevPriorCount).toFixed(2)} (${stat.jevPriorCount})`
-            : "jev事前 -"
+            ? tr(
+                `jev事前 ${(stat.sumJevPrior / stat.jevPriorCount).toFixed(2)} (${stat.jevPriorCount})`,
+                `jev prior ${(stat.sumJevPrior / stat.jevPriorCount).toFixed(2)} (${stat.jevPriorCount})`,
+              )
+            : tr("jev事前 -", "jev prior -")
           const aux = stat.auxCalls > 0
-            ? ` / aux ${stat.auxCalls}回(${Math.round(stat.auxMs / stat.auxCalls)}ms)`
+            ? tr(
+                ` / aux ${stat.auxCalls}回(${Math.round(stat.auxMs / stat.auxCalls)}ms)`,
+                ` / aux ${stat.auxCalls} calls (${Math.round(stat.auxMs / stat.auxCalls)}ms)`,
+              )
             : ""
           lines.push(
-            `- ${stat.topology}: ${stat.count} 回 / ok ${okPct}% / avg ${avgMs} ms / ${q} / ${cp} / ${prior}${aux} / score ${topologyScore(stat, jevAvailable()).toFixed(3)}`,
+            tr(
+              `- ${stat.topology}: ${stat.count} 回 / ok ${okPct}% / avg ${avgMs} ms / ${q} / ${cp} / ${prior}${aux} / score ${topologyScore(stat, jevAvailable()).toFixed(3)}`,
+              `- ${stat.topology}: ${stat.count} runs / ok ${okPct}% / avg ${avgMs} ms / ${q} / ${cp} / ${prior}${aux} / score ${topologyScore(stat, jevAvailable()).toFixed(3)}`,
+            ),
           )
         }
       }
@@ -3686,7 +3917,7 @@ export default Plugin.define({
         limit: 500,
       })
       if (taskPage.entries.length > 0) {
-        lines.push("タスク種別統計")
+        lines.push(tr("タスク種別統計", "Per-category statistics"))
         const byCategory = new Map<string, string[]>()
         for (const entry of taskPage.entries) {
           const stat = entry.value as Stat
@@ -3704,7 +3935,10 @@ export default Plugin.define({
       }
 
       if (routeLog.length > 0) {
-        lines.push("(ルーティングログ:)", ...routeLog.map((l) => `- ${l}`))
+        lines.push(
+          tr("(ルーティングログ:)", "(routing log:)"),
+          ...routeLog.map((l) => `- ${l}`),
+        )
       }
       return lines.join("\n")
     }
@@ -3823,6 +4057,9 @@ export default Plugin.define({
       }
       if (Array.isArray(update.models) && update.models.every((m) => typeof m === "string"))
         cfg.models = update.models as string[]
+      // 表示言語(v0.9.0)。インストールごとの既定は options.lang だが、
+      // /fusion-lang での切替を保存して以後の表示に反映する。
+      if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang
     }
 
     // 永続化用(jevAvailable のような導出値は保存しない)

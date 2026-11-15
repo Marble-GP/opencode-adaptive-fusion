@@ -103,6 +103,8 @@ export const AdaptiveFusion = Rpc.define({
                 },
                 additionalProperties: false,
               },
+              // v0.9.0: 表示言語(ja/en)
+              lang: { type: "string", enum: ["ja", "en"] },
             },
             additionalProperties: false,
           },
@@ -151,6 +153,8 @@ export const AdaptiveFusion = Rpc.define({
                 additionalProperties: false,
               },
               jevAvailable: { type: "boolean" },
+              // v0.9.0: 表示言語
+              lang: { type: "string", enum: ["ja", "en"] },
             },
             required: [
               "enabled",
@@ -180,6 +184,7 @@ export const AdaptiveFusion = Rpc.define({
               "tierMode",
               "tiers",
               "jevAvailable",
+              "lang",
             ],
           },
         },

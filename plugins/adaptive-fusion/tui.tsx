@@ -61,28 +61,32 @@ type FusionConfig = {
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
   jevAvailable?: boolean
+  // v0.9.0: 表示言語(ja/en)
+  lang?: "ja" | "en"
 }
 
-const formatConfig = (c: FusionConfig): string => {
+const formatConfig = (c: FusionConfig, en = false): string => {
+  const T = (ja: string, eng: string) => (en ? eng : ja)
   const lines = [
-    `provider      : ${c.providerID ?? "-"}${c.crossProvider ? " (cross: 全プロバイダー混合)" : ""}`,
+    `provider      : ${c.providerID ?? "-"}${c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : ""}`,
     `routing       : ${c.enabled ? "ON" : "OFF"}`,
+    `lang          : ${c.lang ?? "-"}`,
     `exploreRate   : ${c.exploreRate ?? "-"} (learning ${c.learningRate ?? "-"} / minObs ${c.minObservations ?? "-"})`,
     `weights       : cost ${c.costWeight ?? "-"} / latency ${c.latencyWeight ?? "-"}`,
-    `classifier    : ${c.classifierModel ?? "(分類なし)"}`,
-    `reviewModel   : ${c.reviewModel ?? "(classifierModel と同じ経路 / 共有フォールバック)"}`,
-    `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? "利用可能 (分類・トポロジー判定を Jev で実行)" : "キー未登録 — 従来経路で動作"}`,
-    `topology      : ${c.topologyMode === "fixed" ? "fixed / single 固定" : `auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`}`,
-    `topo weights  : jev事前 ${c.topologyWeightJev ?? "-"} / コスパ ${c.topologyWeightHumanCP ?? "-"} / 自動観測 ${c.topologyWeightAuto ?? "-"}`,
-    `chain         : ${c.chainMode === "active" ? "active (chain選択時にplanner計画をsystem注入)" : "off (判定と記録のみ / /fusion-chainmode で切替)"}`,
-    `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? "auto (ベンチマークから3分割)" : "off (/fusion-tiermode で切替)"}`,
-    `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || "(空)"}`,
-    `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || "(空)"}`,
-    `  light        : ${((c.tiers?.light ?? []).join(", ")) || "(空)"}`,
-    `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken(ホワイトリスト空時のみ)`,
+    `classifier    : ${c.classifierModel ?? T("(分類なし)", "(none)")}`,
+    `reviewModel   : ${c.reviewModel ?? T("(classifierModel と同じ経路 / 共有フォールバック)", "(same path as classifierModel / shared fallback)")}`,
+    `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・トポロジー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
+    `topology      : ${c.topologyMode === "fixed" ? T("fixed / single 固定", "fixed / always single") : T(`auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`, `auto / ${(c.allowedTopologies ?? []).join(", ")} / aux call limit ${c.maxTopologyCalls ?? 4}`)}`,
+    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"}`,
+    `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
+    `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
+    `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,
+    `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
+    `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
+    `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${T("(ホワイトリスト空時のみ)", " (only when the whitelist is empty)")}`,
     `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}`,
     `kinds         : ${(c.kinds ?? []).join(", ")}`,
-    `models(white) : ${(c.models ?? []).length === 0 ? "(全候補 + コスト上限)" : (c.models ?? []).join(", ")}`,
+    `models(white) : ${(c.models ?? []).length === 0 ? T("(全候補 + コスト上限)", "(all candidates + cost cap)") : (c.models ?? []).join(", ")}`,
   ]
   return lines.join("\n")
 }
@@ -96,6 +100,15 @@ export default Plugin.define({
     // プラグイン未登録のロケーションを参照して rpc.unavailable になる)。
     const location = () => context.location ?? context.data.location.default()
 
+    // v0.9.0: 表示言語(ja/en)。インストールごとの既定は opencode.json の
+    // options.lang で選ぶ。保存済み設定(fusion/config の lang)が優先され、
+    // /fusion-lang で実行中にも切り替えられる。
+    const [lang, setLang] = createSignal<"ja" | "en">(
+      (context as any).options?.lang === "en" ? "en" : "ja",
+    )
+    const tr = (ja: string, en: string): string =>
+      lang() === "en" ? en : ja
+
     // fusion: ON/OFF の永続表示用シグナル(初期値は起動時にRPCから取得)。
     // jev の利用状態はバッジに出さず /fusion-config で確認する。
     const [fusionEnabled, setFusionEnabled] = createSignal<boolean | undefined>(
@@ -106,6 +119,9 @@ export default Plugin.define({
         const result: any = await fusion.config({}, { location: location() })
         if (typeof result?.config?.enabled === "boolean")
           setFusionEnabled(result.config.enabled)
+        // 保存済みの言語設定を反映(未保存なら options.lang のまま)
+        if (result?.config?.lang === "ja" || result?.config?.lang === "en")
+          setLang(result.config.lang)
       } catch {
         // 取得失敗時は表示しない(TUIの動作は妨げない)
       }
@@ -231,7 +247,7 @@ export default Plugin.define({
               flexShrink={0}
               onMouseDown={() => context.ui.dialog.clear()}
             >
-              [閉じる] (Esc)
+              {tr("[閉じる] (Esc)", "[close] (Esc)")}
             </text>
           </box>
         ),
@@ -267,7 +283,12 @@ export default Plugin.define({
       const [info, setInfo] = createSignal<ReviewInfo>()
       const [summary, setSummary] = createSignal("")
       const [busy, setBusy] = createSignal(false)
-      const [message, setMessage] = createSignal("応答の質を1〜5で評価してください。")
+      const [message, setMessage] = createSignal(
+        tr(
+          "応答の質を1〜5で評価してください。",
+          "Rate the response quality from 1 to 5.",
+        ),
+      )
 
       const load = async () => {
         try {
@@ -277,7 +298,7 @@ export default Plugin.define({
           )) as ReviewInfo
           setInfo(result)
         } catch (error) {
-          setMessage(`読込失敗: ${errorText(error)}`)
+          setMessage(tr(`読込失敗: ${errorText(error)}`, `Load failed: ${errorText(error)}`))
         }
       }
       void load()
@@ -300,7 +321,9 @@ export default Plugin.define({
           )
           setSummary(result.text)
         } catch (error) {
-          setMessage(`サマリー失敗: ${errorText(error)}`)
+          setMessage(
+            tr(`サマリー失敗: ${errorText(error)}`, `Summary failed: ${errorText(error)}`),
+          )
         } finally {
           setBusy(false)
         }
@@ -314,11 +337,14 @@ export default Plugin.define({
             { location: location() },
           )
           setMessage(result.ok
-            ? `${result.message} — 平均 ${result.feedbackAverage.toFixed(1)}/5 (${result.feedbackCount}件)`
+            ? tr(
+                `${result.message} — 平均 ${result.feedbackAverage.toFixed(1)}/5 (${result.feedbackCount}件)`,
+                `${result.message} — average ${result.feedbackAverage.toFixed(1)}/5 (${result.feedbackCount} entries)`,
+              )
             : result.message)
           await load()
         } catch (error) {
-          setMessage(`評価失敗: ${errorText(error)}`)
+          setMessage(tr(`評価失敗: ${errorText(error)}`, `Rating failed: ${errorText(error)}`))
         } finally {
           setBusy(false)
         }
@@ -334,7 +360,12 @@ export default Plugin.define({
           setMessage(result.ok ? result.message : result.message)
           await load()
         } catch (error) {
-          setMessage(`トポロジーコスパ評価失敗: ${errorText(error)}`)
+          setMessage(
+            tr(
+              `トポロジーコスパ評価失敗: ${errorText(error)}`,
+              `Topology cost-performance rating failed: ${errorText(error)}`,
+            ),
+          )
         } finally {
           setBusy(false)
         }
@@ -344,73 +375,85 @@ export default Plugin.define({
         <box flexDirection="column" padding={1} gap={1} flexGrow={1} minHeight={0} backgroundColor={context.theme.background.raised.base}>
           <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
             <text fg={context.theme.text.base}>
-              Adaptive Fusion — 応答レビュー{offset() > 0 ? `(ターン: ${offset()}個前)` : "(最新応答)"}
+              {tr(
+                `Adaptive Fusion — 応答レビュー${offset() > 0 ? `(ターン: ${offset()}個前)` : "(最新応答)"}`,
+                `Adaptive Fusion — Response review ${offset() > 0 ? `(${offset()} turn(s) back)` : "(latest)"}`,
+              )}
             </text>
-            <text fg={context.theme.text.base} onMouseDown={() => props.close()}>[閉じる]</text>
+            <text fg={context.theme.text.base} onMouseDown={() => props.close()}>{tr("[閉じる]", "[close]")}</text>
           </box>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <text
               fg={context.theme.text.base}
               onMouseDown={() => void shiftOffset(1)}
             >
-              [◀ 古い方へ]
+              {tr("[◀ 古い方へ]", "[◀ older]")}
             </text>
             <text
               fg={context.theme.text.base}
               onMouseDown={() => void shiftOffset(-1)}
             >
-              {offset() > 0 ? "[▶ 新しい方へ]" : "[▶ 最新(現在)]"}
+              {offset() > 0 ? tr("[▶ 新しい方へ]", "[▶ newer]") : tr("[▶ 最新(現在)]", "[▶ latest]")}
             </text>
           </box>
           <text fg={context.theme.text.base} flexShrink={0}>
-            担当: {info()?.category ?? "(読込中)"} | モデル: {info() ? `${info()!.providerID}/${info()!.modelID}` : "-"}
+            {tr("担当", "Category")}: {info()?.category ?? tr("(読込中)", "(loading)")} | {tr("モデル", "Model")}: {info() ? `${info()!.providerID}/${info()!.modelID}` : "-"}
           </text>
           <text fg={context.theme.text.base} flexShrink={0}>
-            依頼: {info()?.instructionPreview ?? "(読込中)"}
+            {tr("依頼", "Request")}: {info()?.instructionPreview ?? tr("(読込中)", "(loading)")}
           </text>
           <text fg={context.theme.text.base} flexShrink={0}>
             {info()?.turn
-              ? `ターン統計: 入 ${info()!.turn!.inputTokens.toLocaleString("en-US")} → 出 ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok`
-              : "ターン統計: (記録なし)"}
+              ? tr(
+                  `ターン統計: 入 ${info()!.turn!.inputTokens.toLocaleString("en-US")} → 出 ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok`,
+                  `Turn stats: in ${info()!.turn!.inputTokens.toLocaleString("en-US")} → out ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok`,
+                )
+              : tr("ターン統計: (記録なし)", "Turn stats: (none recorded)")}
           </text>
           {info()?.turn
             ? (
               <text fg={context.theme.text.base} flexShrink={0}>
-                ↳ 推論 {info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache読み {info()!.turn!.cacheRead.toLocaleString("en-US")} tok / コスト ${info()!.turn!.cost.toFixed(6)}
+                {tr(
+                  `↳ 推論 ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache読み ${info()!.turn!.cacheRead.toLocaleString("en-US")} tok / コスト $${info()!.turn!.cost.toFixed(6)}`,
+                  `↳ reasoning ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache-read ${info()!.turn!.cacheRead.toLocaleString("en-US")} tok / cost $${info()!.turn!.cost.toFixed(6)}`,
+                )}
               </text>
             )
             : null}
           {info()?.turn
             ? (
               <text fg={context.theme.text.base} flexShrink={0}>
-                ↳ 実測 {(info()!.turn!.durationMs / 1000).toFixed(1)}s{info()!.turn!.tps > 0 ? ` / ${info()!.turn!.tps.toFixed(1)} tok/s` : ""} / finish: {info()!.turn!.finish || "?"}
+                {tr("↳ 実測", "↳ measured")} {(info()!.turn!.durationMs / 1000).toFixed(1)}s{info()!.turn!.tps > 0 ? ` / ${info()!.turn!.tps.toFixed(1)} tok/s` : ""} / finish: {info()!.turn!.finish || "?"}
               </text>
             )
             : null}
           <text fg={context.theme.text.base} flexShrink={0}>
-            人間評価: {info() && info()!.feedbackCount > 0
-              ? `${info()!.feedbackAverage.toFixed(1)}/5 (${info()!.feedbackCount}件)`
-              : "まだ評価なし"}
+            {tr("人間評価", "Human rating")}: {info() && info()!.feedbackCount > 0
+              ? `${info()!.feedbackAverage.toFixed(1)}/5 (${info()!.feedbackCount}${tr("件", " entries")})`
+              : tr("まだ評価なし", "no ratings yet")}
           </text>
           <text fg={context.theme.text.base} flexShrink={0}>
-            トポロジー: {info()?.topology ?? "single"}
+            {tr("トポロジー", "Topology")}: {info()?.topology ?? "single"}
             {info() && (info()!.topologyCount ?? 0) > 0
-              ? ` — 実行 ${info()!.topologyCount}回 / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / avg ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`
-              : " — 観測なし"}
+              ? tr(
+                  ` — 実行 ${info()!.topologyCount}回 / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / avg ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
+                  ` — ${info()!.topologyCount} runs / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / avg ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
+                )
+              : tr(" — 観測なし", " — no observations")}
           </text>
           {info() &&
             ((info()!.topologyCount ?? 0) > 0 ||
               (info()!.topologyRatingCount ?? 0) > 0)
             ? (
               <text fg={context.theme.text.base} flexShrink={0}>
-                ↳ {(info()!.topologyQualityAverage ?? 0) > 0 ? `品質 ${info()!.topologyQualityAverage!.toFixed(1)}/5 ・ ` : ""}コスパ {(info()!.topologyRatingCount ?? 0) > 0 ? `${info()!.topologyRatingAverage!.toFixed(1)}/5 (${info()!.topologyRatingCount}件)` : "未評価"}
+                ↳ {(info()!.topologyQualityAverage ?? 0) > 0 ? tr(`品質 ${info()!.topologyQualityAverage!.toFixed(1)}/5 ・ `, `quality ${info()!.topologyQualityAverage!.toFixed(1)}/5 · `) : ""}{tr("コスパ", "cost-perf")} {(info()!.topologyRatingCount ?? 0) > 0 ? `${info()!.topologyRatingAverage!.toFixed(1)}/5 (${info()!.topologyRatingCount}${tr("件", " entries")})` : tr("未評価", "not rated")}
               </text>
             )
             : null}
           {info()?.chainPlan
             ? (
               <text fg={context.theme.text.base} flexShrink={0}>
-                実行計画(chain): {info()!.chainPlan!.slice(0, 160)}
+                {tr("実行計画(chain)", "Chain plan")}: {info()!.chainPlan!.slice(0, 160)}
                 {info()!.chainPlan!.length > 160 ? "…" : ""}
               </text>
             )
@@ -418,28 +461,28 @@ export default Plugin.define({
           {info()?.load
             ? (
               <text fg={context.theme.text.base} flexShrink={0}>
-                負荷帯(tier): {info()!.load!}
+                {tr("負荷帯(tier)", "Load tier")}: {info()!.load!}
               </text>
             )
             : null}
           <text fg={context.theme.text.base} flexShrink={0}>
-            自動審査(shadow): {info()?.autoReview
-              ? `${info()!.autoReview!.average.toFixed(2)}/5 (指示${info()!.autoReview!.instruction.toFixed(1)} / 正確性${info()!.autoReview!.accuracy.toFixed(1)} / 完全性${info()!.autoReview!.completeness.toFixed(1)}${info()!.autoReview!.efficiency !== undefined ? ` / コスパ${info()!.autoReview!.efficiency.toFixed(1)}` : ""}, ${info()!.autoReview!.total}件)`
-              : "未審査(次の応答から記録)"}
+            {tr("自動審査(shadow)", "Auto-review (shadow)")}: {info()?.autoReview
+              ? `${info()!.autoReview!.average.toFixed(2)}/5 (${tr("指示", "instr")}${info()!.autoReview!.instruction.toFixed(1)} / ${tr("正確性", "acc")}${info()!.autoReview!.accuracy.toFixed(1)} / ${tr("完全性", "comp")}${info()!.autoReview!.completeness.toFixed(1)}${info()!.autoReview!.efficiency !== undefined ? ` / ${tr("コスパ", "eff")}${info()!.autoReview!.efficiency.toFixed(1)}` : ""}, ${info()!.autoReview!.total}${tr("件", " entries")})`
+              : tr("未審査(次の応答から記録)", "not reviewed yet (recorded from the next response)")}
           </text>
           {info()?.autoReview?.results?.length
             ? (
               <box flexDirection="column" flexShrink={0}>
                 {info()!.autoReview!.results!.map((item, index) => (
                   <text key={String(index)} fg={context.theme.text.base}>
-                    実績{index + 1}: {item}
+                    {tr("実績", "Result")}{index + 1}: {item}
                   </text>
                 ))}
               </box>
             )
             : null}
           {info()?.autoReview?.reason
-            ? <text fg={context.theme.text.base} flexShrink={0}>自動理由: {info()!.autoReview!.reason}</text>
+            ? <text fg={context.theme.text.base} flexShrink={0}>{tr("自動理由", "Auto reason")}: {info()!.autoReview!.reason}</text>
             : null}
           <scrollbox
             flexGrow={1}
@@ -449,7 +492,7 @@ export default Plugin.define({
             backgroundColor={context.theme.background.raised.base}
             padding={1}
           >
-            <text fg={context.theme.text.base}>{info()?.preview ?? "(読込中)"}</text>
+            <text fg={context.theme.text.base}>{info()?.preview ?? tr("(読込中)", "(loading)")}</text>
           </scrollbox>
           {summary() && (
             <box
@@ -460,14 +503,14 @@ export default Plugin.define({
               height={5}
               flexShrink={0}
             >
-              <text fg={context.theme.text.base}>3行サマリー</text>
+              <text fg={context.theme.text.base}>{tr("3行サマリー", "Three-line summary")}</text>
               <text fg={context.theme.text.base}>{summary()}</text>
             </box>
           )}
-          <text fg={context.theme.text.base} flexShrink={0}>モデル評価(1〜5)</text>
+          <text fg={context.theme.text.base} flexShrink={0}>{tr("モデル評価(1〜5)", "Model rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <text fg={context.theme.text.base} onMouseDown={() => void generateSummary()}>
-              {busy() ? "[サマリー生成中…]" : "[サマリーを生成]"}
+              {busy() ? tr("[サマリー生成中…]", "[generating summary…]") : tr("[サマリーを生成]", "[generate summary]")}
             </text>
             <text fg={context.theme.text.base} onMouseDown={() => void rate(1)}>[1]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rate(2)}>[2]</text>
@@ -475,7 +518,7 @@ export default Plugin.define({
             <text fg={context.theme.text.base} onMouseDown={() => void rate(4)}>[4]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rate(5)}>[5]</text>
           </box>
-          <text fg={context.theme.text.base} flexShrink={0}>トポロジーコスパ評価(1〜5)</text>
+          <text fg={context.theme.text.base} flexShrink={0}>{tr("トポロジーコスパ評価(1〜5)", "Topology cost-performance rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(1)}>[1]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(2)}>[2]</text>
@@ -493,7 +536,7 @@ export default Plugin.define({
       commands: [
         {
           id: "fusion.stats",
-          title: "adaptive-fusion: 学習統計を表示",
+          title: tr("adaptive-fusion: 学習統計を表示", "adaptive-fusion: show learning statistics"),
           slash: { name: "fusion-stats" },
           run: async () => {
             try {
@@ -509,7 +552,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.toggle",
-          title: "adaptive-fusion: ルーティングの有効/無効を切替",
+          title: tr("adaptive-fusion: ルーティングの有効/無効を切替", "adaptive-fusion: toggle routing on/off"),
           slash: { name: "fusion-toggle" },
           run: async () => {
             try {
@@ -528,13 +571,42 @@ export default Plugin.define({
           },
         },
         {
+          id: "fusion.lang",
+          title: tr("adaptive-fusion: 表示言語を切り替え (ja/en)", "adaptive-fusion: switch display language (ja/en)"),
+          slash: { name: "fusion-lang" },
+          run: async () => {
+            const choice = await context.ui.dialog.select({
+              title: tr("表示言語", "Display language"),
+              current: lang(),
+              options: [
+                { title: "日本語 (ja)", value: "ja" },
+                { title: "English (en)", value: "en" },
+              ],
+            })
+            if (choice !== "ja" && choice !== "en") return
+            try {
+              await fusion.config({ update: { lang: choice } }, { location: location() })
+              setLang(choice)
+              context.ui.toast.show({
+                message: choice === "en" ? "language: English" : "言語: 日本語",
+                variant: "success",
+              })
+            } catch (error) {
+              context.ui.toast.show({
+                message: `fusion-lang: ${errorText(error)}`,
+                variant: "error",
+              })
+            }
+          },
+        },
+        {
           id: "fusion.config",
-          title: "adaptive-fusion: 現在の設定を表示",
+          title: tr("adaptive-fusion: 現在の設定を表示", "adaptive-fusion: show current configuration"),
           slash: { name: "fusion-config" },
           run: async () => {
             try {
               const result = await fusion.config({}, { location: location() })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-config: ${errorText(error)}`,
@@ -545,7 +617,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.costcap",
-          title: "adaptive-fusion: ホワイトリスト空時の入力/出力コスト上限を編集",
+          title: tr("adaptive-fusion: ホワイトリスト空時の入力/出力コスト上限を編集", "adaptive-fusion: edit cost caps used when the whitelist is empty"),
           slash: { name: "fusion-costcap" },
           run: async () => {
             try {
@@ -554,14 +626,14 @@ export default Plugin.define({
               const currentMaxOutput = current.config.maxOutputCost ?? 0
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion cost cap",
-                placeholder: "input,output (USD/Mtoken) — 0,0で無料モデルのみ",
+                placeholder: tr("input,output (USD/Mtoken) — 0,0で無料モデルのみ", "input,output (USD/Mtoken) — 0,0 means free models only"),
                 default: `${currentMaxInput},${currentMaxOutput}`,
               })
               if (input === undefined) return
               const values = input.split(",").map((s) => Number(s.trim()))
               if (values.length !== 2 || values.some((v) => !Number.isFinite(v) || v < 0)) {
                 context.ui.toast.show({
-                  message: "cost cap: input,output を 0 以上の数値で入力してください",
+                  message: tr("cost cap: input,output を 0 以上の数値で入力してください", "cost cap: enter input,output as numbers >= 0"),
                   variant: "error",
                 })
                 return
@@ -575,7 +647,7 @@ export default Plugin.define({
                 message: `cost cap: input ${maxInputCost} / output ${maxOutputCost}`,
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-costcap: ${errorText(error)}`,
@@ -586,7 +658,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.reviewmodel",
-          title: "adaptive-fusion: 内部審査(shadow)の担当モデルを設定",
+          title: tr("adaptive-fusion: 内部審査(shadow)の担当モデルを設定", "adaptive-fusion: set the shadow auto-review model"),
           slash: { name: "fusion-reviewmodel" },
           run: async () => {
             try {
@@ -594,14 +666,14 @@ export default Plugin.define({
               const currentModel = current.config.reviewModel ?? ""
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion review model",
-                placeholder: "provider/model (空で解除 = classifierModel と同じフォールバック)",
+                placeholder: tr("provider/model (空で解除 = classifierModel と同じフォールバック)", "provider/model (empty clears it = same fallback as classifierModel)"),
                 default: currentModel,
               })
               if (input === undefined) return
               const reviewModel = input.trim()
               if (reviewModel !== "" && !reviewModel.includes("/")) {
                 context.ui.toast.show({
-                  message: "review model は provider/model 形式で入力してください(空で解除)",
+                  message: tr("review model は provider/model 形式で入力してください(空で解除)", "review model must be in provider/model form (empty clears it)"),
                   variant: "error",
                 })
                 return
@@ -611,10 +683,10 @@ export default Plugin.define({
                 { location: location() },
               )
               context.ui.toast.show({
-                message: reviewModel === "" ? "review model: 解除" : `review model: ${reviewModel}`,
+                message: reviewModel === "" ? tr("review model: 解除", "review model: cleared") : `review model: ${reviewModel}`,
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-reviewmodel: ${errorText(error)}`,
@@ -625,7 +697,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.chainmode",
-          title: "adaptive-fusion: sequential-chain 補助実行(計画注入)の切替",
+          title: tr("adaptive-fusion: sequential-chain 補助実行(計画注入)の切替", "adaptive-fusion: toggle sequential-chain planning injection"),
           slash: { name: "fusion-chainmode" },
           run: async () => {
             try {
@@ -638,8 +710,8 @@ export default Plugin.define({
               context.ui.toast.show({
                 message:
                   result.config.chainMode === "active"
-                    ? "chain 実行: active(chain 選択時に planner 計画を注入)"
-                    : "chain 実行: off(判定と記録のみ)",
+                    ? tr("chain 実行: active(chain 選択時に planner 計画を注入)", "chain execution: active (injects the planner plan on chain turns)")
+                    : tr("chain 実行: off(判定と記録のみ)", "chain execution: off (decide and record only)"),
                 variant: "success",
               })
             } catch (error) {
@@ -652,7 +724,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.tiermode",
-          title: "adaptive-fusion: ティアルーティング(負荷別 Light/Middle/Heavy)の切替",
+          title: tr("adaptive-fusion: ティアルーティング(負荷別 Light/Middle/Heavy)の切替", "adaptive-fusion: cycle tier routing (Light/Middle/Heavy)"),
           slash: { name: "fusion-tiermode" },
           run: async () => {
             try {
@@ -666,15 +738,15 @@ export default Plugin.define({
               )
               const label =
                 next === "manual"
-                  ? "manual(ユーザー定義ティア)"
+                  ? tr("manual(ユーザー定義ティア)", "manual (user-defined tiers)")
                   : next === "auto"
-                  ? "auto(ベンチマークから3分割)"
-                  : "off(全候補から選択)"
+                  ? tr("auto(ベンチマークから3分割)", "auto (split from benchmarks)")
+                  : tr("off(全候補から選択)", "off (select from all candidates)")
               context.ui.toast.show({
                 message: `tier mode: ${label}`,
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-tiermode: ${errorText(error)}`,
@@ -685,7 +757,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.tiers",
-          title: "adaptive-fusion: ティアのモデル編成を設定(Heavy/Middle/Light)",
+          title: tr("adaptive-fusion: ティアのモデル編成を設定(Heavy/Middle/Light)", "adaptive-fusion: edit tier model groups (Heavy/Middle/Light)"),
           slash: { name: "fusion-tiers" },
           run: async () => {
             try {
@@ -700,7 +772,7 @@ export default Plugin.define({
                 const input = await context.ui.dialog.prompt({
                   title: `adaptive-fusion ${label} tier`,
                   placeholder:
-                    "provider/model をカンマ区切りで(例: openrouter/z-ai/glm-5.3, openrouter/deepseek/...)。空でこのティアをクリア",
+                    tr("provider/model をカンマ区切りで(例: openrouter/z-ai/glm-5.3, openrouter/deepseek/...)。空でこのティアをクリア", "Comma-separated provider/model refs (e.g. openrouter/z-ai/glm-5.3, openrouter/deepseek/...). Empty clears this tier"),
                   default: (current.config.tiers?.[tier as "heavy"] ?? []).join(", "),
                 })
                 if (input === undefined) return // キャンセル
@@ -711,7 +783,7 @@ export default Plugin.define({
                 const invalid = models.filter((s) => !s.includes("/"))
                 if (invalid.length > 0) {
                   context.ui.toast.show({
-                    message: `${label} tier: provider/model 形式で入力してください(不正: ${invalid.join(", ")})`,
+                    message: tr(`${label} tier: provider/model 形式で入力してください(不正: ${invalid.join(", ")})`, `${label} tier: enter provider/model refs (invalid: ${invalid.join(", ")})`),
                     variant: "error",
                   })
                   return
@@ -723,10 +795,10 @@ export default Plugin.define({
                 { location: location() },
               )
               context.ui.toast.show({
-                message: "ティア編成を保存しました(tierMode が off の場合は /fusion-tiermode で有効化)",
+                message: tr("ティア編成を保存しました(tierMode が off の場合は /fusion-tiermode で有効化)", "Tier configuration saved (enable it with /fusion-tiermode when tierMode is off)"),
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-tiers: ${errorText(error)}`,
@@ -737,7 +809,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.jevkey",
-          title: "adaptive-fusion: Jev(TypeSafe) APIキーを登録/解除",
+          title: tr("adaptive-fusion: Jev(TypeSafe) APIキーを登録/解除", "adaptive-fusion: register or clear the Jev (TypeSafe) API key"),
           slash: { name: "fusion-jev-key" },
           run: async () => {
             try {
@@ -745,8 +817,8 @@ export default Plugin.define({
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion jev key",
                 placeholder: status.available
-                  ? "現在利用可能 — 新しいキーを入力 / 空で解除"
-                  : "Jev APIキーを入力 / 空で解除(TYPESAFE_API_KEY 環境変数でも可)",
+                  ? tr("現在利用可能 — 新しいキーを入力 / 空で解除", "Currently available — enter a new key, or leave empty to clear")
+                  : tr("Jev APIキーを入力 / 空で解除(TYPESAFE_API_KEY 環境変数でも可)", "Enter the Jev API key, or leave empty to clear (TYPESAFE_API_KEY also works)"),
                 default: "",
               })
               if (input === undefined) return
@@ -755,11 +827,11 @@ export default Plugin.define({
               context.ui.toast.show({
                 message: result.available
                   ? key === ""
-                    ? "jev key: 解除(環境変数 TYPESAFE_API_KEY があればそちらを使用)"
-                    : "jev key: 登録しました(利用可能)"
+                    ? tr("jev key: 解除(環境変数 TYPESAFE_API_KEY があればそちらを使用)", "jev key: cleared (TYPESAFE_API_KEY is used if set)")
+                    : tr("jev key: 登録しました(利用可能)", "jev key: stored (available)")
                   : key === ""
-                    ? "jev key: 解除しました"
-                    : "jev key: 登録しましたが、現在の設定では無効です(jevMode=off?)",
+                    ? tr("jev key: 解除しました", "jev key: cleared")
+                    : tr("jev key: 登録しましたが、現在の設定では無効です(jevMode=off?)", "jev key: stored, but disabled by the current configuration (jevMode=off?)"),
                 variant: "success",
               })
             } catch (error) {
@@ -772,13 +844,13 @@ export default Plugin.define({
         },
         {
           id: "fusion.review",
-          title: "adaptive-fusion: 応答をサマリー/1〜5評価",
+          title: tr("adaptive-fusion: 応答をサマリー/1〜5評価", "adaptive-fusion: summarize and rate a response (1-5)"),
           slash: { name: "fusion-review" },
           run: async () => {
             const sessionID = await currentSessionID()
             if (!sessionID) {
               context.ui.toast.show({
-                message: "fusion-review: 現在のセッションを特定できませんでした",
+                message: tr("fusion-review: 現在のセッションを特定できませんでした", "fusion-review: could not identify the current session"),
                 variant: "error",
               })
               return
@@ -788,8 +860,8 @@ export default Plugin.define({
             let initialOffset = 0
             try {
               const turnInput = await context.ui.dialog.prompt({
-                title: "adaptive-fusion review 対象ターン",
-                placeholder: "0=最新, 1=1個前, 2=2個前… (空で最新)",
+                title: tr("adaptive-fusion review 対象ターン", "adaptive-fusion review: target turn"),
+                placeholder: tr("0=最新, 1=1個前, 2=2個前… (空で最新)", "0=latest, 1=one turn back, 2=two turns back… (empty = latest)"),
                 default: "0",
               })
               if (turnInput !== undefined && turnInput.trim().length > 0) {
@@ -825,7 +897,7 @@ export default Plugin.define({
         },
         {
           id: "fusion.whitelist",
-          title: "adaptive-fusion: ルーティング候補モデルのホワイトリスト編集",
+          title: tr("adaptive-fusion: ルーティング候補モデルのホワイトリスト編集", "adaptive-fusion: edit the routing candidate whitelist"),
           slash: { name: "fusion-whitelist" },
           run: async () => {
             try {
@@ -835,8 +907,8 @@ export default Plugin.define({
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion whitelist",
                 placeholder: cross
-                  ? "provider/model-id, ... (空で全候補 例: openrouter/z-ai/glm-4.6)"
-                  : "model-id-1, model-id-2 (空で全候補)",
+                  ? tr("provider/model-id, ... (空で全候補 例: openrouter/z-ai/glm-4.6)", "provider/model-id, ... (empty = all candidates, e.g. openrouter/z-ai/glm-4.6)")
+                  : tr("model-id-1, model-id-2 (空で全候補)", "model-id-1, model-id-2 (empty = all candidates)"),
                 ...(currentText ? { default: currentText } : {}),
               })
               if (input === undefined) return
@@ -850,12 +922,12 @@ export default Plugin.define({
               )
               context.ui.toast.show({
                 message: `whitelist: ${
-                  models.length === 0 ? "(全候補)" : models.join(", ")
+                  models.length === 0 ? tr("(全候補)", "(all candidates)") : models.join(", ")
                 }`,
                 variant: "success",
               })
               if (result.config) {
-                showLongText("adaptive-fusion config", formatConfig(result.config))
+                showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
               }
             } catch (error) {
               context.ui.toast.show({
@@ -867,14 +939,14 @@ export default Plugin.define({
         },
         {
           id: "fusion.provider",
-          title: "adaptive-fusion: ルーティング対象プロバイダーを変更",
+          title: tr("adaptive-fusion: ルーティング対象プロバイダーを変更", "adaptive-fusion: change the routing target provider"),
           slash: { name: "fusion-provider" },
           run: async () => {
             try {
               const current = await fusion.config({}, { location: location() })
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion provider",
-                placeholder: "provider-id (例: openrouter / opencode)",
+                placeholder: tr("provider-id (例: openrouter / opencode)", "provider-id (e.g. openrouter / opencode)"),
                 ...(current.config.providerID
                   ? { default: current.config.providerID }
                   : {}),
@@ -892,7 +964,7 @@ export default Plugin.define({
                 message: `provider: ${result.config.providerID}`,
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config))
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-provider: ${errorText(error)}`,
@@ -903,21 +975,22 @@ export default Plugin.define({
         },
         {
           id: "fusion.probe",
-          title: "adaptive-fusion: 候補モデルに一斉テストプロンプトを送信",
+          title: tr("adaptive-fusion: 候補モデルに一斉テストプロンプトを送信", "adaptive-fusion: probe all candidate models"),
           slash: { name: "fusion-probe" },
           run: async () => {
             const ok = await context.ui.dialog.confirm({
               title: "adaptive-fusion probe",
               message:
-                "候補モデルに一斉にテストプロンプトを送信します。\n" +
-                "成否・レイテンシを学習統計に記録し、失敗モデルはクールダウンします。\n" +
-                "最大16モデル・並列4・1件20秒程度かかる場合があります。実行しますか?",
+                tr(
+                  "候補モデルに一斉にテストプロンプトを送信します。\n成否・レイテンシを学習統計に記録し、失敗モデルはクールダウンします。\n最大16モデル・並列4・1件20秒程度かかる場合があります。実行しますか?",
+                  "Send a test prompt to all candidate models.\nSuccess and latency are recorded in the learning statistics, and failing models are cooled down.\nUp to 16 models, 4 in parallel, about 20 s each. Run it now?",
+                ),
               label: { confirm: "Run", cancel: "Cancel" },
             })
             if (!ok) return
             try {
               context.ui.toast.show({
-                message: "probe: 実行中…",
+                message: tr("probe: 実行中…", "probe: running…"),
                 variant: "info",
               })
               const result = await fusion.probe({}, { location: location() })
@@ -932,12 +1005,12 @@ export default Plugin.define({
         },
         {
           id: "fusion.reset",
-          title: "adaptive-fusion: 学習統計・クールダウンをリセット",
+          title: tr("adaptive-fusion: 学習統計・クールダウンをリセット", "adaptive-fusion: reset learning statistics and cooldowns"),
           slash: { name: "fusion-reset" },
           run: async () => {
             const ok = await context.ui.dialog.confirm({
               title: "adaptive-fusion",
-              message: "学習統計とクールダウン(利用不可フラグ)をリセットしますか?",
+              message: tr("学習統計とクールダウン(利用不可フラグ)をリセットしますか?", "Reset learning statistics and cooldowns (unusable flags)?"),
               label: { confirm: "Reset", cancel: "Cancel" },
             })
             if (!ok) return
