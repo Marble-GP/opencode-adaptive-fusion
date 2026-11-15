@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased] — v1.0 (in development)
+
+### Added
+- **Audit auto-review in routing scores (`autoReviewWeight`)**: the independent
+  audit model (`reviewModel`, a separate harness — not self-scoring) can feed the
+  quality term of the routing score with weight `0..1` (`0` = shadow display only,
+  default preserved). Sample gate (N ≥ 10), quality axes only (`efficiency`
+  excluded), and a divergence guard that halves the weight when shadow/human
+  `|Δ| ≥ 1.0`. New command `/fusion-audit`, new `autoReviewWeight` config field.
+- **Full-turn cost model**: the routing cost penalty now compares
+  `input + output + cache.read + cache.write` unit prices (USD/1M tokens)
+  instead of output price alone.
+
+### Fixed
+- **Probe strictness**: the recovery probe (`Reply with exactly: OK`) now
+  requires an exact `OK` reply; any other non-empty answer is treated as a
+  failure, because a model that cannot follow a trivial instruction is not
+  evidence of recovery.
+
+### Changed
+- README: routing score section documents the three quality sources and their
+  gates; topology section now states that only `sequential-chain` is a genuinely
+  different execution mode (`single`/`router` share classification and selection).
+
 ## [0.9.1] - 2026-11-15
 
 Packaging and release hygiene. No functional changes to the plugin logic.

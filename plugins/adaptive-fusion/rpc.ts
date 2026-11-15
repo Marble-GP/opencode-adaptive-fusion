@@ -105,6 +105,8 @@ export const AdaptiveFusion = Rpc.define({
               },
               // v0.9.0: display language (ja/en)
               lang: { type: "string", enum: ["ja", "en"] },
+              // v1.0: independent-audit auto-review weight in routing quality
+              autoReviewWeight: { type: "number" },
             },
             additionalProperties: false,
           },
@@ -155,6 +157,8 @@ export const AdaptiveFusion = Rpc.define({
               jevAvailable: { type: "boolean" },
               // v0.9.0: display language
               lang: { type: "string", enum: ["ja", "en"] },
+              // v1.0: independent-audit auto-review weight
+              autoReviewWeight: { type: "number" },
             },
             required: [
               "enabled",
@@ -185,6 +189,7 @@ export const AdaptiveFusion = Rpc.define({
               "tiers",
               "jevAvailable",
               "lang",
+              "autoReviewWeight",
             ],
           },
         },

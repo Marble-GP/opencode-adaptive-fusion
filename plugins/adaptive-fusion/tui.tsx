@@ -14,6 +14,7 @@
 // /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
 // /fusion-reviewmodel Set the model responsible for internal (shadow) review
+// /fusion-audit      Set the weight (0..1) of the audit auto-review in routing quality (0 = shadow display only)
 // /fusion-chainmode  Toggle sequential-chain auxiliary execution (plan injection) off/active
 // /fusion-tiermode   Toggle tier routing (Light/Middle/Heavy by load)
 // /fusion-tiers      Edit the model groups per tier (whitelist on steroids)
@@ -63,6 +64,8 @@ type FusionConfig = {
   jevAvailable?: boolean
   // v0.9.0: display language (ja/en)
   lang?: "ja" | "en"
+  // v1.0: independent-audit auto-review weight in routing quality (0 = shadow only)
+  autoReviewWeight?: number
 }
 
 const formatConfig = (c: FusionConfig, en = false): string => {
@@ -73,6 +76,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `lang          : ${c.lang ?? "-"}`,
     `exploreRate   : ${c.exploreRate ?? "-"} (learning ${c.learningRate ?? "-"} / minObs ${c.minObservations ?? "-"})`,
     `weights       : cost ${c.costWeight ?? "-"} / latency ${c.latencyWeight ?? "-"}`,
+    `autoReview    : ${c.autoReviewWeight ?? "-"} (v1.0: audit weight inside the quality term, 0 = shadow only)`,
     `classifier    : ${c.classifierModel ?? T("(分類なし)", "(none)")}`,
     `reviewModel   : ${c.reviewModel ?? T("(classifierModel と同じ経路 / 共有フォールバック)", "(same path as classifierModel / shared fallback)")}`,
     `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・トポロジー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
@@ -689,6 +693,47 @@ export default Plugin.define({
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-reviewmodel: ${errorText(error)}`,
+                variant: "error",
+              })
+            }
+          },
+        },
+        {
+          id: "fusion.audit",
+          title: tr("adaptive-fusion: 自動監査の重みを設定(0 = shadow表示のみ)", "adaptive-fusion: set the auto-review weight (0 = shadow display only)"),
+          slash: { name: "fusion-audit" },
+          run: async () => {
+            try {
+              const current = await fusion.config({}, { location: location() })
+              const currentW = current.config.autoReviewWeight ?? 0
+              const input = await context.ui.dialog.prompt({
+                title: "adaptive-fusion audit weight",
+                placeholder: tr("0..1 (0.2 など; 0 で無効)", "0..1 (e.g. 0.2; 0 disables it)"),
+                default: String(currentW),
+              })
+              if (input === undefined) return
+              const w = Number(input.trim())
+              if (!Number.isFinite(w) || w < 0 || w > 1) {
+                context.ui.toast.show({
+                  message: tr("auto review weight は 0..1 の数値で入力してください", "auto review weight must be a number from 0 to 1"),
+                  variant: "error",
+                })
+                return
+              }
+              const result = await fusion.config(
+                { update: { autoReviewWeight: w } },
+                { location: location() },
+              )
+              context.ui.toast.show({
+                message: w === 0
+                  ? tr("auto review weight: 0 (shadow 表示のみ)", "auto review weight: 0 (shadow display only)")
+                  : `auto review weight: ${w}`,
+                variant: "success",
+              })
+              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
+            } catch (error) {
+              context.ui.toast.show({
+                message: `fusion-audit: ${errorText(error)}`,
                 variant: "error",
               })
             }

@@ -224,6 +224,7 @@ messages to the agent and never pollute session history.
 | `/fusion-costcap` | Edit input/output cost caps used when the whitelist is empty (default `0,0`). |
 | `/fusion-review` | Open the response review panel: summary, 1–5 rating, turn statistics. **Pick a turn to review older responses** (`0 = latest`, `1 = one turn back`, …). |
 | `/fusion-reviewmodel` | Set the shadow auto-review model (`provider/model`; empty clears it). |
+| `/fusion-audit` | Set the auto-review weight (`0` = shadow display only; `0.2` typical when enabled). |
 | `/fusion-jev-key` | Register a Jev (TypeSafe) API key via a dialog (empty clears it). The key is stored server-side; `TYPESAFE_API_KEY` also works. |
 | `/fusion-chainmode` | Toggle sequential-chain planning injection (`off` / `active`). |
 | `/fusion-tiermode` | Cycle tier routing `off → manual → auto`. |
@@ -262,6 +263,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `benchmarkPriorWeight` | `5` | Strength (k) of the benchmark prior. `0` disables it. |
 | `benchmarksFile` | `data/benchmarks.json` | Benchmark seed file (relative paths resolve against the plugin). |
 | `reviewModel` | (none) | Shadow auto-review model. Falls back like `classifierModel` when unset. |
+| `autoReviewWeight` | `0` | Weight (0..1) of the independent-audit auto-review signal inside the routing quality term. `0` = shadow display only. Set with `/fusion-audit`. |
 | `topologyMode` | `auto` | `auto` (Jev/observed stats) or `fixed` (single only). |
 | `allowedTopologies` | `["single","router","sequential-chain"]` | Whitelist of orchestration shapes. |
 | `maxTopologyCalls` | `4` | Upper bound of auxiliary calls per response (cost guard). |
@@ -278,9 +280,58 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 
 ```
 score = successRate (Laplace-smoothed, benchmark prior optional) × 0.65
-      + humanReviewRating × 0.35
+      + quality × 0.35
       − costPenalty − relativeLatencyPenalty
 ```
+
+with
+
+```
+quality = (1 − w) × humanReviewScore + w × auditAutoReviewScore
+w = autoReviewWeight (0 by default)
+```
+
+The three quality sources are deliberately kept distinct:
+
+| Source | Signal | Involvement in routing |
+| --- | --- | --- |
+| Machine observation | HTTP success/failure rate, per task category | Machine term (0.65), always on |
+| Human review | 1–5 ratings via `/fusion-review` | Quality term, always on |
+| Audit auto-review | 1–5 by an independent audit model (`reviewModel`) running in a separate harness after the response was returned | Quality term, only when `autoReviewWeight > 0` |
+
+Audit auto-review is not self-scoring: the auditor is a different model, it
+runs after the response, and it never blocks the user-visible answer. Even so
+it only takes effect behind gates (default `autoReviewWeight = 0` keeps the
+legacy shadow behaviour):
+
+1. **Sample gate:** with fewer than 10 audit reviews the audit score is
+   neutral, so a few early scores cannot move routing. Beta smoothing shrinks
+   toward neutral.
+2. **Quality axes only:** instruction / accuracy / completeness. `efficiency`
+   is cost-performance and already overlaps with the cost penalty, so it is
+   excluded.
+3. **Divergence guard:** when the auditor systematically disagrees with human
+   ratings (`|shadow − human| ≥ 1.0` with at least 5 human ratings), its
+   effective weight is halved. This is the same `|Δ| ≥ 1.0` criterion shown
+   in `/fusion-stats`.
+
+The human 0.35 term is preserved: the audit signal only mixes **inside** the
+quality term, it never changes the 0.65/0.35 split.
+
+### Cost model
+
+The routing cost penalty compares the **expected full-turn cost**, not just
+the output unit price:
+
+```
+unit cost = input + output + cache.read + cache.write   (USD / 1M tokens)
+refCost   = unit cost / max(unit cost over candidates)
+```
+
+Coding-agent tasks are dominated by input and cache-read tokens, so an
+input-expensive model can be the more expensive choice even when its output
+is cheap. The responsiveness baseline (observed per-task token mixes) is
+reserved for a later iteration.
 
 - The success rate is smoothed with a Beta prior seeded from benchmarks, so
   observations eventually dominate the prior.
@@ -350,9 +401,11 @@ scores the response in the background. This never blocks the user-visible respon
   exceptions) are recorded in `fusion/auto-skip/latest` and shown in `/fusion-stats`.
 - **Storage:** separate from human ratings (`fusion/auto/...` globally and per
   category). Results are kept per model (latest 5).
-- **Mode:** current release is **shadow only** — scores are displayed but not yet used
-  for routing. The plan is to switch to active scoring after the average gap between
-  shadow and human ratings is confirmed below 1.0.
+- **Mode:** since v1.0 the auditor can take part in routing when
+  `autoReviewWeight > 0` (set with `/fusion-audit`). Default is `0`: shadow
+  display only. When enabled, its scores mix only inside the quality term
+  behind sample and divergence gates. See "How the routing score works" for
+  the full gate list.
 - **Cost:** one review call per response. Point `reviewModel` at a cheap model if
   free quotas are scarce.
 
@@ -376,10 +429,13 @@ Turn: in 203 → out 513 tok
 - After the original model's cooldown clears (including provider quota cooldown), the
   session is **automatically restored** to it on a later prompt (24 h restore window).
 - **Verified cooldown:** the 1-hour quota timer expiring does *not* mean recovery.
-  A minimal live probe (`Reply with exactly: OK`) must succeed before the cooldown is
-  lifted (`needsVerify`). A failed probe extends the cooldown by another hour.
-  Verified lifts are logged as `VERIFY ok/fail`; successes that clear a cooldown are
-  logged as `RECOVER ok`.
+  A minimal live probe (`Reply with exactly: OK`) must return exactly `OK`
+  before the cooldown is lifted (`needsVerify`). A failed probe extends the
+  cooldown by another hour. Verified lifts are logged as `VERIFY ok/fail`;
+  successes that clear a cooldown are logged as `RECOVER ok`. A probe that
+  returns anything else (even a long free-form answer) is treated as a
+  failure, because a model that cannot follow a trivial instruction is not
+  evidence of recovery.
 - Provider-level quota cooldowns apply **only to free models**; paid models of the same
   provider remain eligible as rescue targets.
 - Rescue may widen candidates to budget-conforming paid models (always across
@@ -423,6 +479,12 @@ Turn: in 203 → out 513 tok
 
 ### Orchestration shapes
 
+Only `sequential-chain` runs a genuinely different execution. `single` and
+`router` share the same underlying classification and model selection (they
+differ in whether the classifier runs and how the model is chosen), so do not
+treat `single` vs `router` as two independently implemented execution modes.
+Planned multi-agent shapes are only comparable once implemented.
+
 | Shape | Execution | Calls |
 | --- | --- | --- |
 | single | Current behavior (one session model) | 1 |
@@ -444,6 +506,9 @@ Topology selection uses, in order:
 `chainMode=active` enables sequential-chain planning injection: a planner call
 (8 s timeout) produces a 3–5 line plan that is pushed once into the system context
 for that turn only. Failures degrade silently to single behavior.
+
+Todo: define execution semantics for every shape before comparing track
+records, e.g. Plan → Execute → Verify → Repair for chained runs.
 
 ### Tier routing
 
@@ -498,9 +563,10 @@ Models absent from the file are neutral (0.5, no penalty). Priors older than 90 
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
+| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe | **In development** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
-| v0.7c | collaboration, graph, statistic key separation, token estimates | Planned |
-| v1.0 | Active auto-review scoring, benchmark refresh automation | Planned |
+| v0.7c | collaboration, graph, statistic key separation | Planned |
+| v1.0+ | benchmark refresh automation, test harness, comparative experiments | Planned |
 
 ---
 

@@ -219,6 +219,13 @@ type FusionConfig = {
   // Display language (v0.9.0). Chosen per install via options.lang,
   // and can also be switched with /fusion-lang. Default is ja.
   lang: "ja" | "en"
+  // Weight (0..1) of the independent-audit auto-review signal in the quality term
+  // of the routing score (v1.0). 0 = shadow only (scores displayed but not used
+  // for routing). The audit model runs in a separate harness (reviewModel),
+  // so its scores are only mixed into the human-quality term after its own
+  // gates pass: sample gate, quality-axis selection, and shadow/human
+  // divergence check (see autoReviewScore / effectiveAutoWeight).
+  autoReviewWeight: number
 }
 
 // Load bands (three levels of task/intelligence load). The difficulty score 0-100 is
@@ -357,6 +364,9 @@ export default Plugin.define({
       // Display language. Can be chosen per install via opencode.json options.lang
       // (same saved-settings > options priority as other items).
       lang: ctx.options.lang === "en" ? "en" : "ja",
+      // Weight of the independent-audit auto-review signal. 0 (default) = shadow
+      // only, i.e. displayed but not used for routing.
+      autoReviewWeight: clamp(num(ctx.options.autoReviewWeight, 0), 0, 1),
     }
 
     // Display-language helper (v0.9.0). First argument is Japanese, second is English.
@@ -432,6 +442,8 @@ export default Plugin.define({
       if (s.tiers && typeof s.tiers === "object")
         cfg.tiers = sanitizeTiers(s.tiers)
       if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
+      if (typeof s.autoReviewWeight === "number")
+        cfg.autoReviewWeight = clamp(s.autoReviewWeight, 0, 1)
       if (Array.isArray(s.kinds) && s.kinds.every((k) => typeof k === "string")) {
         cfg.kinds.length = 0
         cfg.kinds.push(...(s.kinds as string[]))
@@ -1658,6 +1670,57 @@ export default Plugin.define({
       return (normalizedSum + 1) / (n + 2)
     }
 
+    // ------------------------------------------------------------------
+    // Independent-audit auto-review signal (v1.0)
+    // ------------------------------------------------------------------
+    // The audit model (reviewModel) runs in a separate harness after the
+    // response has already been returned; it never sees the generator's
+    // internals and never blocks the user-visible answer. Its scores are
+    // therefore NOT self-scoring, so with gates they can safely contribute
+    // to the quality term of the routing score.
+    //
+    // Integration design (preserving the 0.65 machine / 0.35 human split):
+    //   quality = (1 - w) * humanScore + w * autoScore     (0 <= w <= 1)
+    //   score   = 0.65 * machineRate + 0.35 * quality - costPenalties
+    // Gates:
+    //   1. Sample gate: autoReviewWeight == 0 (default) keeps legacy shadow
+    //      behavior. With w > 0, autoScore is neutral (0.5) until the model
+    //      has >= AUTO_REVIEW_MIN_SAMPLES reviews, so a few early scores
+    //      cannot move routing. Beta smoothing shrinks toward 0.5 anyway.
+    //   2. Quality axes only: instruction / accuracy / completeness.
+    //      efficiency is cost-perf and already overlaps with cost penalties.
+    //   3. Divergence guard: if a reviewer systematically disagrees with
+    //      human ratings, its effective weight is halved, never doubled.
+    const AUTO_REVIEW_MIN_SAMPLES = 10
+    const autoReviewScore = (auto: unknown): number => {
+      if (!auto || typeof auto !== "object") return 0.5
+      const a = auto as AutoReviewStat
+      const n = num(a.total, 0)
+      if (n < AUTO_REVIEW_MIN_SAMPLES) return 0.5
+      const sum3 =
+        num(a.instruction, 0) + num(a.accuracy, 0) + num(a.completeness, 0)
+      const normalizedSum = (sum3 - 3 * n) / 4
+      // Same beta smoothing as feedbackScore (2 pseudo-observations) so
+      // small-but-passing samples still sit near neutral.
+      return (normalizedSum + 1) / (3 * n + 6)
+    }
+    // Effective weight after divergence guard. Human average is only trusted
+    // with enough samples; below that, the guard does not fire.
+    const effectiveAutoWeight = (
+      auto: AutoReviewStat | undefined,
+      feedback: Record<string, unknown> | undefined,
+    ): number => {
+      const w = cfg.autoReviewWeight
+      if (w <= 0 || !auto) return 0
+      const autoN = num(auto.total, 0)
+      if (autoN < AUTO_REVIEW_MIN_SAMPLES) return 0
+      const autoAvg = (auto.instruction + auto.accuracy + auto.completeness) / (autoN * 3)
+      const humanN = num(feedback?.count, 0)
+      if (humanN < 5) return w
+      const humanAvg = num(feedback?.ratingSum, 0) / humanN
+      return Math.abs(autoAvg - humanAvg) >= 1.0 ? w / 2 : w
+    }
+
     const recordFeedback = async (
       providerID: string,
       modelID: string,
@@ -2807,19 +2870,36 @@ export default Plugin.define({
     // ------------------------------------------------------------------
     // Routing (experimental.model.resolve)
     // ------------------------------------------------------------------
-    // Routing Score (v0.5.1):
-    //   score = automatic-observation success rate x 0.65 + human review rating x 0.35
-    //         - costWeight    x normalized cost (relative ratio among candidates)
-    //         - latencyWeight x normalized latency (relative ratio among candidates. 0-1)
-    // Human ratings are normalized from 1-5 to 0-1 and smoothed beta-distribution-style.
-    // If per-task-category stats are sufficient (>= minObservations), they take priority;
-    // otherwise fall back to overall stats, then to the neutral 0.5.
+    // Routing Score (v1.0):
+    //   score = 0.65 * machineSuccess + 0.35 * quality
+    //           - costWeight    x normalized cost (relative ratio among candidates)
+    //           - latencyWeight x normalized latency (relative ratio among candidates. 0-1)
+    // Machine success is blended with a benchmark prior. Quality is human
+    // ratings blended with the independent-audit auto-review signal when
+    // autoReviewWeight > 0 (see autoReviewScore). Human ratings are
+    // normalized from 1-5 to 0-1 and smoothed beta-distribution-style.
+    // If per-task-category stats are sufficient (>= minObservations), they
+    // take priority; otherwise fall back to overall stats, then neutral 0.5.
+    // Routing cost (v1.0) compares the expected full-turn cost, not just the
+    // output unit price: input + output + cache-read unit prices (USD/Mtoken),
+    // normalized by the candidate maximum. Long-input coding tasks can make an
+    // input-expensive model the more expensive choice even if its output is cheap.
+    const routingCostOf = (model: { cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } }[] }): number => {
+      const tier = model.cost?.[0]
+      if (!tier) return Infinity
+      const input = num(tier.input, 0)
+      const output = num(tier.output, 0)
+      const cacheRead = num(tier.cache?.read, 0)
+      const cacheWrite = num(tier.cache?.write, 0)
+      return input + output + cacheRead + cacheWrite
+    }
     const statScore = (
       stat: Stat,
       feedback: unknown,
       refCost: number,
       benchmark?: number,
       benchmarkK = 0,
+      autoReview?: unknown,
     ): number => {
       const n = stat.success + stat.failure
       const machine = blendBenchmarkPrior(
@@ -2829,7 +2909,13 @@ export default Plugin.define({
         benchmarkK,
       )
       const human = feedbackScore(feedback as Record<string, unknown> | undefined)
-      const score = 0.65 * machine + 0.35 * human
+      const w = effectiveAutoWeight(
+        autoReview as AutoReviewStat | undefined,
+        feedback as Record<string, unknown> | undefined,
+      )
+      const auto = autoReviewScore(autoReview)
+      const quality = (1 - w) * human + w * auto
+      const score = 0.65 * machine + 0.35 * quality
       return score - cfg.costWeight * refCost
     }
 
@@ -2892,7 +2978,8 @@ export default Plugin.define({
       }
       const tierPrefix = () => (tierTag ? `tier:${tierTag} ` : "")
 
-      const maxCost = Math.max(...models.map((m) => m.cost[0].output)) || 1
+      const maxCost =
+        Math.max(...models.map((m) => routingCostOf(m))) || 1
       // Benchmark prior (v0.6): applied to candidates after the budget filter.
       // If the file is missing / k=0, the benchmark side is disabled.
       const benchmarks = loadBenchmarks()
@@ -2919,6 +3006,11 @@ export default Plugin.define({
             ? await loadTaskFeedback(category, model.providerID, model.id)
             : undefined
           const globalFeedback = taskFeedback ?? await loadFeedback(model.providerID, model.id)
+          const taskAuto = category
+            ? await loadTaskAutoReview(category, model.providerID, model.id)
+            : undefined
+          const globalAuto =
+            taskAuto ?? (await loadAutoReview(model.providerID, model.id))
           entries.push({
             ref,
             providerID: model.providerID,
@@ -2928,9 +3020,10 @@ export default Plugin.define({
             score: statScore(
               task,
               globalFeedback,
-              model.cost[0].output / maxCost,
+              routingCostOf(model) / maxCost,
               benchmark,
               benchK,
+              globalAuto,
             ),
           })
           continue
@@ -2940,6 +3033,7 @@ export default Plugin.define({
           const n = global.success + global.failure
           const avgMs = global.totalMs / n
           const feedback = await loadFeedback(model.providerID, model.id)
+          const auto = await loadAutoReview(model.providerID, model.id)
           entries.push({
             ref,
             providerID: model.providerID,
@@ -2949,18 +3043,26 @@ export default Plugin.define({
             score: statScore(
               global,
               feedback,
-              model.cost[0].output / maxCost,
+              routingCostOf(model) / maxCost,
               benchmark,
               benchK,
+              auto,
             ),
           })
           continue
         }
         const feedback = await loadFeedback(model.providerID, model.id)
+        const auto = await loadAutoReview(model.providerID, model.id)
         const human = feedbackScore(feedback as Record<string, unknown> | undefined)
+        const w = effectiveAutoWeight(
+          auto as AutoReviewStat | undefined,
+          feedback as Record<string, unknown> | undefined,
+        )
+        const quality =
+          (1 - w) * human + w * autoReviewScore(auto)
         // With only human ratings, do not treat unobserved models as a flat 0.5
         const coldMachine = blendBenchmarkPrior(0, 0, benchmark, benchK)
-        entries.push({ ref, providerID: model.providerID, id: model.id, n: 0, avgMs: 0, score: 0.65 * coldMachine + 0.35 * human })
+        entries.push({ ref, providerID: model.providerID, id: model.id, n: 0, avgMs: 0, score: 0.65 * coldMachine + 0.35 * quality - cfg.costWeight * (routingCostOf(model) / maxCost) })
       }
       // Penalize latency normalized by the relative ratio among candidates.
       // (Previously fixed at avgMs / 60_000, so a ~0.5s model was only penalized
@@ -3424,11 +3526,12 @@ export default Plugin.define({
         ])
         const ms = performance.now() - started
         const text = String(result?.text ?? "").trim()
+        const ok = text === "OK"
         return {
           model,
-          ok: text.length > 0,
+          ok,
           ms,
-          note: text.length > 0 ? "" : "empty response",
+          note: ok ? "" : text.length === 0 ? "empty response" : "unexpected response",
           preview: text.slice(0, 40),
         }
       } catch (error) {
@@ -3800,6 +3903,17 @@ export default Plugin.define({
       const topologyEntries = topologyPage.entries.filter(
         (entry) => !entry.key.startsWith(TASK_TOPOLOGY_PREFIX),
       )
+      // Independent-audit auto-review (v1.0): weight in routing quality
+      lines.push(
+        tr(
+          cfg.autoReviewWeight > 0
+            ? `自動監査重み: ${cfg.autoReviewWeight} (品質項内。N≥${AUTO_REVIEW_MIN_SAMPLES} 未満は中立 / 乖離|Δ|≥1.0 では半減)。0 で無効。`
+            : `自動監査重み: 0 (無効; shadow 表示のみ)。`,
+          cfg.autoReviewWeight > 0
+            ? `audit weight: ${cfg.autoReviewWeight} (within the quality term. Below N≥${AUTO_REVIEW_MIN_SAMPLES} it is neutral / halved when |Δ|≥1.0). 0 disables it.`
+            : `audit weight: 0 (disabled; shadow display only).`,
+        ),
+      )
       if (topologyEntries.length > 0) {
         lines.push(
           tr(
@@ -4040,6 +4154,8 @@ export default Plugin.define({
       // Display language (v0.9.0). Default per install is options.lang,
       // but the switch with /fusion-lang is persisted and reflected in later display.
       if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang
+      if (typeof update.autoReviewWeight === "number")
+        cfg.autoReviewWeight = clamp(update.autoReviewWeight, 0, 1)
     }
 
     // 永続化用(jevAvailable のような導出値は保存しない)
