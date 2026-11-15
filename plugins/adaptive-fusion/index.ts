@@ -3356,10 +3356,12 @@ export default Plugin.define({
         ...(chainPlans.has(sessionID)
           ? { chainPlan: chainPlans.get(sessionID)!.plan }
           : {}),
-        // Tier routing (v0.8): this session's load band (optional)
-        ...(sessionLoad.has(sessionID)
-          ? { load: sessionLoad.get(sessionID)! }
-          : {}),
+        // Tier routing (v0.8): the load band of this session.
+        // Fall back to a heuristic estimate from the reviewed turn when the
+        // in-memory map has no entry (plugin restarted, or the session
+        // predates tier tracking), so the panel always shows a load band.
+        load: sessionLoad.get(sessionID) ??
+          heuristicLoad(target.instruction, target.category || undefined),
         // RPC schema is an optional object. Never pass undefined as a key
         ...(autoReview ? { autoReview } : {}),
       }

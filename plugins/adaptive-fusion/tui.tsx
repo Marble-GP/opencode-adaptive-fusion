@@ -236,7 +236,7 @@ export default Plugin.define({
             flexDirection="column"
             gap={1}
           >
-            <text fg={context.theme.text.base} flexShrink={0}>{title}</text>
+            <text fg={context.theme.text.base}>{title}</text>
             <scrollbox
               flexGrow={1}
               minHeight={4}
@@ -375,7 +375,7 @@ export default Plugin.define({
       }
 
       return (
-        <box flexDirection="column" padding={1} gap={1} flexGrow={1} minHeight={0} backgroundColor={context.theme.background.raised.base}>
+        <box flexDirection="column" padding={1} gap={0} flexGrow={1} minHeight={0} backgroundColor={context.theme.background.raised.base}>
           <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
             <text fg={context.theme.text.base}>
               {tr(
@@ -399,94 +399,57 @@ export default Plugin.define({
               {offset() > 0 ? tr("[▶ 新しい方へ]", "[▶ newer]") : tr("[▶ 最新(現在)]", "[▶ latest]")}
             </text>
           </box>
-          <text fg={context.theme.text.base} flexShrink={0}>
-            {tr("担当", "Category")}: {info()?.category ?? tr("(読込中)", "(loading)")} | {tr("モデル", "Model")}: {info() ? `${info()!.providerID}/${info()!.modelID}` : "-"}
+          <text fg={context.theme.text.base}>
+            {tr("担当", "Category")}: {info()?.category ?? tr("(読込中)", "(loading)")} | {tr("負荷", "Load")}: {info()?.load ?? tr("(未推定)", "(unset)")} | {tr("モデル", "Model")}: {info() ? `${info()!.providerID}/${info()!.modelID}` : "-"}
           </text>
-          <text fg={context.theme.text.base} flexShrink={0}>
-            {tr("依頼", "Request")}: {info()?.instructionPreview ?? tr("(読込中)", "(loading)")}
+          <text fg={context.theme.text.base}>
+            {tr("依頼", "Request")}: {info()?.instructionPreview
+              ? info()!.instructionPreview.replace(/\s+/g, " ").slice(0, 84) + (info()!.instructionPreview.replace(/\s+/g, " ").length > 84 ? "…" : "")
+              : tr("(読込中)", "(loading)")}
           </text>
-          <text fg={context.theme.text.base} flexShrink={0}>
+          <text fg={context.theme.text.base}>
             {info()?.turn
               ? tr(
-                  `ターン統計: 入 ${info()!.turn!.inputTokens.toLocaleString("en-US")} → 出 ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok`,
-                  `Turn stats: in ${info()!.turn!.inputTokens.toLocaleString("en-US")} → out ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok`,
+                  `ターン統計: 入 ${info()!.turn!.inputTokens.toLocaleString("en-US")} → 出 ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok / 推論 ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache読み ${info()!.turn!.cacheRead.toLocaleString("en-US")} / $${info()!.turn!.cost.toFixed(6)}`,
+                  `Turn stats: in ${info()!.turn!.inputTokens.toLocaleString("en-US")} → out ${info()!.turn!.outputTokens.toLocaleString("en-US")} tok / reasoning ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache-read ${info()!.turn!.cacheRead.toLocaleString("en-US")} / $${info()!.turn!.cost.toFixed(6)}`,
                 )
               : tr("ターン統計: (記録なし)", "Turn stats: (none recorded)")}
           </text>
           {info()?.turn
             ? (
-              <text fg={context.theme.text.base} flexShrink={0}>
-                {tr(
-                  `↳ 推論 ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache読み ${info()!.turn!.cacheRead.toLocaleString("en-US")} tok / コスト $${info()!.turn!.cost.toFixed(6)}`,
-                  `↳ reasoning ${info()!.turn!.reasoningTokens.toLocaleString("en-US")} / cache-read ${info()!.turn!.cacheRead.toLocaleString("en-US")} tok / cost $${info()!.turn!.cost.toFixed(6)}`,
-                )}
-              </text>
-            )
-            : null}
-          {info()?.turn
-            ? (
-              <text fg={context.theme.text.base} flexShrink={0}>
+              <text fg={context.theme.text.base}>
                 {tr("↳ 実測", "↳ measured")} {(info()!.turn!.durationMs / 1000).toFixed(1)}s{info()!.turn!.tps > 0 ? ` / ${info()!.turn!.tps.toFixed(1)} tok/s` : ""} / finish: {info()!.turn!.finish || "?"}
               </text>
             )
             : null}
-          <text fg={context.theme.text.base} flexShrink={0}>
+          <text fg={context.theme.text.base}>
             {tr("人間評価", "Human rating")}: {info() && info()!.feedbackCount > 0
               ? `${info()!.feedbackAverage.toFixed(1)}/5 (${info()!.feedbackCount}${tr("件", " entries")})`
               : tr("まだ評価なし", "no ratings yet")}
-          </text>
-          <text fg={context.theme.text.base} flexShrink={0}>
+            {"  "}
             {tr("トポロジー", "Topology")}: {info()?.topology ?? "single"}
             {info() && (info()!.topologyCount ?? 0) > 0
               ? tr(
-                  ` — 実行 ${info()!.topologyCount}回 / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / avg ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
-                  ` — ${info()!.topologyCount} runs / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / avg ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
+                  ` (${info()!.topologyCount}回 / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
+                  ` (${info()!.topologyCount} runs / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
                 )
-              : tr(" — 観測なし", " — no observations")}
+              : tr(" (観測なし)", " (no observations)")}
+            {info() && (info()!.topologyCount ?? 0) > 0
+              ? `${(info()!.topologyQualityAverage ?? 0) > 0 ? `, ${tr("品質", "quality")} ${info()!.topologyQualityAverage!.toFixed(1)}` : ""}, ${tr("コスパ", "cost-perf")} ${(info()!.topologyRatingCount ?? 0) > 0 ? info()!.topologyRatingAverage!.toFixed(1) : tr("未評価", "n/a")})`
+              : ""}
           </text>
-          {info() &&
-            ((info()!.topologyCount ?? 0) > 0 ||
-              (info()!.topologyRatingCount ?? 0) > 0)
-            ? (
-              <text fg={context.theme.text.base} flexShrink={0}>
-                ↳ {(info()!.topologyQualityAverage ?? 0) > 0 ? tr(`品質 ${info()!.topologyQualityAverage!.toFixed(1)}/5 ・ `, `quality ${info()!.topologyQualityAverage!.toFixed(1)}/5 · `) : ""}{tr("コスパ", "cost-perf")} {(info()!.topologyRatingCount ?? 0) > 0 ? `${info()!.topologyRatingAverage!.toFixed(1)}/5 (${info()!.topologyRatingCount}${tr("件", " entries")})` : tr("未評価", "not rated")}
-              </text>
-            )
-            : null}
           {info()?.chainPlan
             ? (
-              <text fg={context.theme.text.base} flexShrink={0}>
-                {tr("実行計画(chain)", "Chain plan")}: {info()!.chainPlan!.slice(0, 160)}
-                {info()!.chainPlan!.length > 160 ? "…" : ""}
+              <text fg={context.theme.text.base}>
+                {tr("実行計画(chain)", "Chain plan")}: {info()!.chainPlan!.replace(/\s+/g, " ").slice(0, 84)}{info()!.chainPlan!.replace(/\s+/g, " ").length > 84 ? "…" : ""}
               </text>
             )
             : null}
-          {info()?.load
-            ? (
-              <text fg={context.theme.text.base} flexShrink={0}>
-                {tr("負荷帯(tier)", "Load tier")}: {info()!.load!}
-              </text>
-            )
-            : null}
-          <text fg={context.theme.text.base} flexShrink={0}>
+          <text fg={context.theme.text.base}>
             {tr("自動審査(shadow)", "Auto-review (shadow)")}: {info()?.autoReview
-              ? `${info()!.autoReview!.average.toFixed(2)}/5 (${tr("指示", "instr")}${info()!.autoReview!.instruction.toFixed(1)} / ${tr("正確性", "acc")}${info()!.autoReview!.accuracy.toFixed(1)} / ${tr("完全性", "comp")}${info()!.autoReview!.completeness.toFixed(1)}${info()!.autoReview!.efficiency !== undefined ? ` / ${tr("コスパ", "eff")}${info()!.autoReview!.efficiency.toFixed(1)}` : ""}, ${info()!.autoReview!.total}${tr("件", " entries")})`
+              ? `${info()!.autoReview!.average.toFixed(2)}/5 (${info()!.autoReview!.total}${tr("件", " entries")}) — ${tr("指示", "instr")}${info()!.autoReview!.instruction.toFixed(1)} / ${tr("正確性", "acc")}${info()!.autoReview!.accuracy.toFixed(1)} / ${tr("完全性", "comp")}${info()!.autoReview!.completeness.toFixed(1)}${info()!.autoReview!.efficiency !== undefined ? ` / ${tr("コスパ", "eff")}${info()!.autoReview!.efficiency.toFixed(1)}` : ""}`
               : tr("未審査(次の応答から記録)", "not reviewed yet (recorded from the next response)")}
           </text>
-          {info()?.autoReview?.results?.length
-            ? (
-              <box flexDirection="column" flexShrink={0}>
-                {info()!.autoReview!.results!.map((item, index) => (
-                  <text key={String(index)} fg={context.theme.text.base}>
-                    {tr("実績", "Result")}{index + 1}: {item}
-                  </text>
-                ))}
-              </box>
-            )
-            : null}
-          {info()?.autoReview?.reason
-            ? <text fg={context.theme.text.base} flexShrink={0}>{tr("自動理由", "Auto reason")}: {info()!.autoReview!.reason}</text>
-            : null}
           <scrollbox
             flexGrow={1}
             minHeight={4}
@@ -495,6 +458,27 @@ export default Plugin.define({
             backgroundColor={context.theme.background.raised.base}
             padding={1}
           >
+            {info()?.autoReview?.results?.length
+              ? (
+                <box flexDirection="column" flexShrink={0}>
+                  {info()!.autoReview!.results!.map((item, index) => (
+                    <text key={String(index)} fg={context.theme.text.base}>
+                      {tr("実績", "Result")}{index + 1}: {item}
+                    </text>
+                  ))}
+                </box>
+              )
+              : null}
+            {info()?.autoReview?.reason
+              ? <text fg={context.theme.text.base}>{tr("自動理由", "Auto reason")}: {info()!.autoReview!.reason}</text>
+              : null}
+            {(info()?.autoReview?.results?.length || info()?.autoReview?.reason)
+              ? (
+                <text fg={context.theme.textMuted?.base ?? context.theme.text.base}>
+                  ─── {tr("応答本文", "Response body")} ───
+                </text>
+              )
+              : null}
             <text fg={context.theme.text.base}>{info()?.preview ?? tr("(読込中)", "(loading)")}</text>
           </scrollbox>
           {summary() && (
@@ -503,14 +487,14 @@ export default Plugin.define({
               borderColor={context.theme.border.base}
               backgroundColor={context.theme.background.raised.base}
               padding={1}
-              height={5}
+              height={4}
               flexShrink={0}
             >
               <text fg={context.theme.text.base}>{tr("3行サマリー", "Three-line summary")}</text>
               <text fg={context.theme.text.base}>{summary()}</text>
             </box>
           )}
-          <text fg={context.theme.text.base} flexShrink={0}>{tr("モデル評価(1〜5)", "Model rating (1-5)")}</text>
+          <text fg={context.theme.text.base}>{tr("モデル評価(1〜5)", "Model rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <text fg={context.theme.text.base} onMouseDown={() => void generateSummary()}>
               {busy() ? tr("[サマリー生成中…]", "[generating summary…]") : tr("[サマリーを生成]", "[generate summary]")}
@@ -521,7 +505,7 @@ export default Plugin.define({
             <text fg={context.theme.text.base} onMouseDown={() => void rate(4)}>[4]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rate(5)}>[5]</text>
           </box>
-          <text fg={context.theme.text.base} flexShrink={0}>{tr("トポロジーコスパ評価(1〜5)", "Topology cost-performance rating (1-5)")}</text>
+          <text fg={context.theme.text.base}>{tr("トポロジーコスパ評価(1〜5)", "Topology cost-performance rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(1)}>[1]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(2)}>[2]</text>
@@ -529,7 +513,7 @@ export default Plugin.define({
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(4)}>[4]</text>
             <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(5)}>[5]</text>
           </box>
-          <text fg={context.theme.text.base} flexShrink={0}>{message()}</text>
+          <text fg={context.theme.text.base}>{message()}</text>
         </box>
       )
     }
@@ -922,8 +906,8 @@ export default Plugin.define({
             context.ui.dialog.show(
               () => (
                 <box
-                  width={84}
-                  height={44}
+                  width={92}
+                  height={48}
                   border
                   borderColor={context.theme.border.base}
                   backgroundColor={context.theme.background.raised.base}
