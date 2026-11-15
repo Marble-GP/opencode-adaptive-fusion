@@ -1,5 +1,5 @@
 // OpenCode Adaptive Fusion - RPC contract
-// サーバー部(index.ts)が実装し、TUI部(tui.ts)から呼び出される。
+// Implemented by the server part (index.ts) and called from the TUI part (tui.ts).
 
 import { Rpc } from "@opencode/plugin/rpc"
 
@@ -103,7 +103,7 @@ export const AdaptiveFusion = Rpc.define({
                 },
                 additionalProperties: false,
               },
-              // v0.9.0: 表示言語(ja/en)
+              // v0.9.0: display language (ja/en)
               lang: { type: "string", enum: ["ja", "en"] },
             },
             additionalProperties: false,
@@ -153,7 +153,7 @@ export const AdaptiveFusion = Rpc.define({
                 additionalProperties: false,
               },
               jevAvailable: { type: "boolean" },
-              // v0.9.0: 表示言語
+              // v0.9.0: display language
               lang: { type: "string", enum: ["ja", "en"] },
             },
             required: [
@@ -197,7 +197,7 @@ export const AdaptiveFusion = Rpc.define({
       input: {
         type: "object",
         properties: {
-          // 省略/空文字は現在の利用可否を返すだけ、空文字は登録解除、非空は登録
+          // Omitted / empty string just reports current availability; empty string unregisters, non-empty registers
           key: { type: "string" },
         },
         additionalProperties: false,
@@ -205,7 +205,7 @@ export const AdaptiveFusion = Rpc.define({
       output: {
         type: "object",
         properties: {
-          // キー自体は絶対に返さない。利用可否だけを返す
+          // Never return the key itself. Only return availability
           available: { type: "boolean" },
         },
         required: ["available"],
@@ -218,7 +218,7 @@ export const AdaptiveFusion = Rpc.define({
         type: "object",
         properties: {
           sessionID: { type: "string" },
-          // v0.9.0: レビュー対象ターン(0=最新, 1=1個前, …)。省略時は 0。
+          // v0.9.0: review target turn (0 = latest, 1 = one before, ...). Defaults to 0.
           offset: { type: "number" },
         },
         required: ["sessionID"],
@@ -228,7 +228,7 @@ export const AdaptiveFusion = Rpc.define({
         type: "object",
         properties: {
           sessionID: { type: "string" },
-          // v0.9.0: 対象ターンの正規化済み値(0=最新)
+          // v0.9.0: normalized value of the target turn (0 = latest)
           offset: { type: "number" },
           category: { type: "string" },
           messageID: { type: "string" },
@@ -240,8 +240,8 @@ export const AdaptiveFusion = Rpc.define({
           responseLength: { type: "number" },
           feedbackAverage: { type: "number" },
           feedbackCount: { type: "number" },
-          // v0.9.0: ターン統計(入出力トークン/コスト/実測速度)。
-          // メッセージに tokens/cost/time の記録があるターンのみ存在(optional)
+          // v0.9.0: turn statistics (input/output tokens, cost, measured speed).
+          // Present only for turns where the message has recorded tokens/cost/time (optional)
           turn: {
             type: "object",
             properties: {
@@ -270,18 +270,18 @@ export const AdaptiveFusion = Rpc.define({
             ],
             additionalProperties: false,
           },
-          // このセッションで判定したオーケストレーション形態(/fusion-review の「使用トポロジー」行)
+          // The orchestration topology decided in this session (the "topology used" row of /fusion-review)
           topology: { type: "string" },
           topologyRatingAverage: { type: "number" },
           topologyRatingCount: { type: "number" },
-          // 観測実績(D-3): この形態の全体統計(実行回数/ok率/実測レイテンシ/品質)
+          // v0.9.0: observation metrics (D-3): overall stats of this topology (runs, ok-rate, measured latency, quality)
           topologyCount: { type: "number" },
           topologyOkRate: { type: "number" },
           topologyAvgMs: { type: "number" },
           topologyQualityAverage: { type: "number" },
-          // sequential-chain で注入済みの実行計画(存在時のみ。optional は required 外)
+          // Execution plan injected via sequential-chain (only when present; optional, so not in required)
           chainPlan: { type: "string" },
-          // ティアルーティング(v0.8)の負荷帯(存在時のみ)
+          // Tier routing (v0.8) load band (only when present)
           load: { type: "string", enum: ["heavy", "middle", "light"] },
           autoReview: {
             type: "object",
@@ -290,9 +290,9 @@ export const AdaptiveFusion = Rpc.define({
               instruction: { type: "number" },
               accuracy: { type: "number" },
               completeness: { type: "number" },
-              // v0.9.0: コストパフォーマンス軸の平均(未収集はキーごと省略)
+              // v0.9.0: efficiency axis average (omitted when uncollected, per key)
               efficiency: { type: "number" },
-              // v0.9.0: 直近の実績列挙(未収集はキーごと省略)
+              // v0.9.0: list of recent results (omitted when uncollected, per key)
               results: { type: "array", items: { type: "string" } },
               reason: { type: "string" },
               reviewerRef: { type: "string" },
@@ -340,7 +340,7 @@ export const AdaptiveFusion = Rpc.define({
         type: "object",
         properties: {
           sessionID: { type: "string" },
-          // v0.9.0: レビュー対象ターン(0=最新, 1=1個前, …)。省略時は 0。
+          // v0.9.0: review target turn (0 = latest, 1 = one before, ...). Defaults to 0.
           offset: { type: "number" },
         },
         required: ["sessionID"],
@@ -359,11 +359,11 @@ export const AdaptiveFusion = Rpc.define({
         type: "object",
         properties: {
           sessionID: { type: "string" },
-          // モデルの品質評価(1〜5)。省略可(その場合はトポロジーコスパのみ記録)
+          // Model quality rating (1-5). Optional (if omitted, only the topology cost-performance is recorded)
           rating: { type: "number" },
-          // トポロジー(オーケストレーション形態)のコスパ評価(1〜5、/fusion-review 第2行)
+          // Topology (orchestration shape) cost-performance rating (1-5, /fusion-review second row)
           topologyRating: { type: "number" },
-          // v0.9.0: レビュー対象ターン(0=最新, 1=1個前, …)。省略時は 0。
+          // v0.9.0: review target turn (0 = latest, 1 = one before, ...). Defaults to 0.
           offset: { type: "number" },
         },
         required: ["sessionID"],

@@ -1,0 +1,38 @@
+{
+  "name": "opencode-adaptive-fusion",
+  "version": "0.9.1",
+  "description": "Learning-based model routing and orchestration plugin for OpenCode",
+  "type": "module",
+  "author": "S. Watanabe",
+  "license": "MIT",
+  "homepage": "https://github.com/Marble-GP/opencode-adaptive-fusion",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Marble-GP/opencode-adaptive-fusion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Marble-GP/opencode-adaptive-fusion/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "model-routing",
+    "orchestration",
+    "llm-routing"
+  ],
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx",
+    "./rpc": "./rpc.ts"
+  },
+  "files": [
+    "index.ts",
+    "tui.tsx",
+    "rpc.ts",
+    "jev.ts",
+    "package.json"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  }
+}

@@ -1,0 +1,128 @@
+137:     "単一の質問・編集・説明など、1つのモデル応答で十分な依頼。分解・並列化の利点がない、または小さすぎる",
+139:     "タスクの種類(実装/デバッグ/レビュー等)によって専門モデルへ振り分けるべき依頼。分類してからカテゴリ別の最適モデルに回すのが適切",
+141:     "計画→実行→検証のような順序依存の多段階処理。前の段階の成果物を次の段階へ引き継ぐ必要がある依頼",
+143:     "独立したサブタスクへ分解でき、並列に処理して統合すべき依頼(v0.7b)",
+145:     "planner が複数ワーカーへ割り当て、synthesizer が統合すべき大規模依頼(v0.7b)",
+1248:         /(リファクタ|設計|アーキテクチャ|全ての|すべての|一括|移行|実装|migrate|refactor|architect|design|implement|across all files|multi-step)/i
+1252:       if (/(タイポ|typo|直して|修正して|rename|fix this)/i.test(text)) score -= 20
+1547:           `${topology}: ${stat.count}件 (ok ${okPct}%, quality ${quality})`,
+1931:           tr("(指示文を取得できませんでした)", "(could not read the instruction)")
+1935:           .split(/(?<=[。！？.!?])\s*|[\n;]+/u)
+1940:           tr(`指示: ${instructionLine}`, `Instruction: ${instructionLine}`),
+1941:           tr(`実施: ${result}`, `Work: ${result}`),
+1942:           tr(`成果: ${result}`, `Outcome: ${result}`),
+1948:           "以下はユーザー指示とアシスタントの応答です。",
+1952:           "ユーザーには、次の3行の日本語だけを返してください。",
+1956:           "1行目: 指示: 何を依頼されたか",
+1960:           "2行目: 実施: どのような作業をしたか",
+1964:           "3行目: 成果: 何を達成・改善したか",
+1968:           "箇条書き記号、見出し、余分な前置きは禁止です。各行を簡潔にしてください。",
+1991:         ["debugging", [/エラー|バグ|障害|例外|crash|exception|fix/i, /修正|直して|原因/i]],
+1992:         ["coding", [/実装|コード|プログラム|関数|クラス|implement|code|function|class/i]],
+1993:         ["review", [/レビュー|検証|確認|監査|review|verify|check/i]],
+1994:         ["writing", [/文章|ドキュメント|README|記事|文書|document|writing/i]],
+1995:         ["ops", [/シェル|コマンド|環境|ビルド|デプロイ|実行|shell|command|environment|build|deploy/i]],
+1996:         ["research", [/調査|質問|説明|調べ|なぜ|どう|research|question|explain/i]],
+2148:       // sequential-chain の補助実行(v0.7a 完全版)。admission 時に pending を積み、
+2149:       // 実行は主モデル dispatch 直前の context フックで行う。
+2298:           "以下の指示を達成するための手順を3〜5行で列挙してください。",
+2302:           "工程の順序依存と検証方法を明示してください。",
+2306:           "前置き・見出し・整形は不要で、手順の行だけを返してください。",
+2333:         "【オーケストレーション補助: 実行計画(参考)】",
+2334:         "以下は補助モデルが作成した手順案です。拘束ではなく参考として扱い、",
+2335:         "手順の過不足や誤りはあなたの判断で修正して成果を出してください。",
+2336:         "--- 計画 ---",
+2412:                 "--- ターン統計(参考) ---",
+2416:                 `モデル: ${target.providerID}/${target.modelID} / 入力 ${t.inputTokens} tok (cache読み ${t.cacheRead}) / 出力 ${t.outputTokens} tok / 実測 ${(t.durationMs / 1000).toFixed(1)}s / ${t.tps > 0 ? t.tps.toFixed(1) + " tok/s" : "速度不明"} / コスト $${t.cost.toFixed(6)}`,
+2423:             "以下はユーザー指示とアシスタント応答のペアを評価してください。",
+2427:             "4つの軸を1〜5の整数で採点します。",
+2431:             "instruction = 依頼を正しく理解し意図に応えたか(5=完全に応えた / 3=部分的 / 1=答えず)",
+2435:             "accuracy = 内容は正確か(5=正確かつ根拠あり / 3=概ね正しいが要修正 / 1=誤りが多い)",
+2439:             "completeness = 必要な作業をやり切ったか(5=完遂 / 3=途中まで / 1=未着手)",
+2443:             "efficiency = コストパフォーマンス(消費トークン・時間に対する成果)(5=最小の労力で完遂 / 3=やや冗長または低速 / 1=資源を浪費した割に成果が薄い)",
+2446:           tr("reason は日本語で1行。", "Write reason as a single English line."),
+2448:             'results は「応答が実際に成し遂げた実績」を列挙してください(日本語、各項目1行)。具体的な証拠ベースで: 作成・変更したファイル、実行したコマンド、提示した回答・数値など。抽象的な感想(丁寧だった等)は実績に含めない。実績を確認できない場合は ["実績なし"] のみ。',
+2452:           tr("--- ユーザー指示 ---", "--- user instruction ---"),
+2454:           tr("--- アシスタント応答 ---", "--- assistant response ---"),
+2536:               parseAxis(/指示[^\d]{0,40}([1-5])/)
+2538:               parseAxis(/正確[^\d]{0,40}([1-5])/)
+2540:               parseAxis(/完了|完遂[^\d]{0,40}([1-5])/)
+2543:               parseAxis(/効率|コスパ[^\d]{0,40}([1-5])/)
+3195:           preview: tr("(応答なし)", "(no response)"),
+3240:         category: target.category || tr("(未分類)", "(unclassified)"),
+3245:         preview: target.preview || tr("(空の応答)", "(empty response)"),
+3271:               `${offset}個前の応答は評価できる内容がありません`,
+3275:               "まだ評価できる応答がありません",
+3325:             "rating または topologyRating のどちらかを指定してください",
+3332:             "rating は 1〜5 の整数で入力してください",
+3340:             "topologyRating は 1〜5 の整数で入力してください",
+3349:                 `${offset}個前の応答が見つかりません`,
+3353:                 "最新応答が見つかりません",
+3376:               `評価を記録しました: ${rating}/5`,
+3382:               `トポロジーコスパを記録しました: ${topologyRating}/5 (${topologyInfo.topology})`,
+3390:         category: target.category || tr("(未分類)", "(unclassified)"),
+3469:           "(プローブ対象のモデルがありません)",
+3474:           `プローブ対象: ${targets.length} 件${capped ? `(候補${all.length} 件から先頭のみ)` : ""}`,
+3516:           `結果: ok ${okCount} / fail ${results.length - okCount}`,
+3530:           `(コスト上限: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
+3531:             `${cfg.models.length === 0 ? " — ホワイトリスト空時に適用" : " (ホワイトリスト優先)"})`,
+3537:         lines.push(tr("(ルーティング: OFF / 観測のみ)", "(routing: OFF / observing only)"))
+3541:             "(モード: crossProvider / 全プロバイダー混合)",
+3548:             `(モード: 単一プロバイダー ${cfg.providerID})`,
+3558:               "(ベンチマーク事前: 無効 / k=0)",
+3565:               "(ベンチマーク事前: ファイルが読めません。全モデル中立 0.5 扱い)",
+3575:               `(ベンチマーク事前: 有効 k=${k} / モデル数 ${Object.keys(benchmarks.models ?? {}).length}` +
+3576:                 ` / fetchedAt ${(benchmarks.fetchedAt ?? "不明").slice(0, 10)}${stale ? " / 90日経過: kを半減(陳腐化対策)" : ""})`,
+3587:             "(Jev: OFF / jevMode=off — 従来経路で動作)",
+3594:             `(Jev: 利用可能 / ${process.env.TYPESAFE_API_KEY?.trim() ? "環境変数" : "登録キー"}で認証` +
+3595:               ` — 分類・トポロジー判定を Jev で実行)`,
+3603:             "(Jev: キー未登録 — 従来経路で動作 / /fusion-jev-key で登録)",
+3611:               "(トポロジー: fixed / single 固定)",
+3615:               `(トポロジー: auto / 許可: ${cfg.allowedTopologies.join(", ")} / 補助呼出上限 ${cfg.maxTopologyCalls})`,
+3630:             `(学習期間: 探索率 ${Math.round(cfg.learningRate * 100)}% / 未熟モデル ${cold.length} 件)`,
+3644:             `(プロバイダー冷却: ${cooledProviders.length} 件 — 無料枠はアカウント単位で全滅)`,
+3649:               `- ${id}: ${p.quota ? tr("クオータ制限", "quota limited") : tr("エラー", "error")} / ${tr("残り", "remaining")} ${Math.max(0, Math.round((p.until - Date.now()) / 1000))}s`,
+3655:             `(クールダウン: ${cooled.length} 件)`,
+3663:                       "検証待ち(制限の再確認中 — 1hごとに再プローブ)",
+3667:                     ? tr("クオータ制限", "quota limited")
+3668:                     : tr(`失敗${c.failures} 回`, `${c.failures} failure(s)`)
+3672:                       `残り ${Math.max(0, Math.round((c.until - Date.now()) / 1000))}s`,
+3675:                   : tr("再検証待ち", "awaiting reprobe")
+3681:       lines.push(tr("全体統計", "Overall statistics"))
+3692:         lines.push(tr("(データなし)", "(no data)"))
+3702:         lines.push(tr("人間評価:", "Human ratings:"))
+3707:             `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg}/5 (${stat.count} ${tr("件", "entries")})`,
+3723:         lines.push(tr("内部審査(shadow):", "Auto-review (shadow):"))
+3740:             `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg.toFixed(2)}/5 (${stat.total} ${tr("件", "entries")}, reviewer ${stat.reviewerRef ?? "-"})`,
+3745:           lines.push(tr("審査モデル別(shadow):", "By reviewer model (shadow):"))
+3749:               `- reviewer ${reviewer}: ${avg.toFixed(2)}/5 (${agg.total} ${tr("件", "entries")})`,
+3758:               `内部審査スキップ: ${skip.total} 件`,
+3779:               `- ${ref}: shadow ${autoAvg.toFixed(2)} vs 人間 ${humanAvg.toFixed(2)} (差 ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})${flag}`,
+3787:               "乖離(shadow − 人間、|差|≥1.0 は要確認):",
+3806:             `(トポロジー選定スコア重み: Jev事前 w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (キー無しのため w1=0 運用)"} / コスパ w2=${cfg.topologyWeightHumanCP} / 自動観測 w3=${cfg.topologyWeightAuto})`,
+3813:                 "(chain 実行: active — sequential-chain 選択時に planner を実行し計画を system 参照として注入)",
+3817:                 "(chain 実行: off — 判定と記録のみ / /fusion-chainmode で切替)",
+3828:                 `(ティア: mode=${cfg.tierMode} — 導出不可(auto はベンチマーク3件以上が必要)/ 従来選択で動作)`,
+3835:                 `(ティア: mode=${cfg.tierMode} / 負荷帯 Light/Middle/Heavy → 該当層から上方カスケード)`,
+3861:                   `- ${tier}: ${tiers[tier].length} モデル (${tiers[tier].join(", ") || "空"}) / ${n} req / ok ${okPct}% / avg ${avgMs} ms`,
+3866:             lines.push(tr("ティア別集計:", "Per-tier totals:"), ...tierLines)
+3871:               "(ティア: off — 全候補から選択 / /fusion-tiermode で切替)",
+3876:         lines.push(tr("トポロジー(観測):", "Topologies (observed):"))
+3887:                 `コスパ ${(stat.sumCostPerformance / stat.costPerformanceCount).toFixed(2)}/5 (${stat.costPerformanceCount})`,
+3890:             : tr("コスパ -", "cost-perf -")
+3893:                 `jev事前 ${(stat.sumJevPrior / stat.jevPriorCount).toFixed(2)} (${stat.jevPriorCount})`,
+3896:             : tr("jev事前 -", "jev prior -")
+3899:                 ` / aux ${stat.auxCalls}回(${Math.round(stat.auxMs / stat.auxCalls)}ms)`,
+3905:               `- ${stat.topology}: ${stat.count} 回 / ok ${okPct}% / avg ${avgMs} ms / ${q} / ${cp} / ${prior}${aux} / score ${topologyScore(stat, jevAvailable()).toFixed(3)}`,
+3917:         lines.push(tr("タスク種別統計", "Per-category statistics"))
+3936:           tr("(ルーティングログ:)", "(routing log:)"),
+3958:       // クールダウン(利用不可フラグ)もクリア
+3959:       // v0.8.1: マージ方式の persist に削除が反映されるよう tombstone 化。
+3960:       // 他インスタンスが stale map で再書き込みしても復活しないようにする。
+3968:       // rescue 復帰待機も全クリア
+3971:       // sequential-chain の実行状態もクリア
+3974:       // 負荷帯(v0.8 ティアルーティング)もクリア
+4045:     // 永続化用(jevAvailable のような導出値は保存しない)
+4047:     // RPC 応答用(導出値を含む表示スナップショット)
+4077:           // 空文字は登録解除(storage 上は空文字で無効化し、環境変数があればそちらを優先)
+4083:         // キー自体は絶対に返さない。利用可否だけを返す

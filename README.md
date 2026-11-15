@@ -47,17 +47,40 @@ The plugin has no runtime npm dependencies. Optional integrations:
 
 ## Installation
 
-### 1. Get the plugin
+Two ways to install are supported. Pick one — do not do both (registering the plugin
+in two places makes OpenCode load two instances in one process).
+
+### Option A — OpenCode CLI (recommended)
+
+Install the plugin straight from this repository (the repository root is the
+plugin package; its `package.json` maps `exports` into `plugins/adaptive-fusion/`):
+
+```bash
+opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v0.9.1'
+```
+
+OpenCode installs it into the **global** plugin configuration. Verify and manage it with:
+
+```bash
+opencode plugin list
+opencode plugin update opencode-adaptive-fusion
+opencode plugin remove  opencode-adaptive-fusion
+```
+
+Exact tags such as `v0.9.1` stay pinned to that tag; omit the `#…` suffix to track the
+default branch, and use `opencode plugin update` to jump forward. Restart OpenCode
+after installing (TUI parts load at startup).
+
+### Option B — clone and register the directory manually
+
+#### 1. Get the plugin
 
 ```bash
 git clone https://github.com/Marble-GP/opencode-adaptive-fusion.git
 cd opencode-adaptive-fusion
 ```
 
-Any directory works; the path is registered explicitly in the next step. If you
-prefer not to use Git, download a release archive and extract it.
-
-### 2. Register the plugin in OpenCode's **global** config
+#### 2. Register the plugin in OpenCode's **global** config
 
 OpenCode loads plugins from the `plugins` array of the *global* configuration file:
 
@@ -67,14 +90,15 @@ OpenCode loads plugins from the `plugins` array of the *global* configuration fi
 | Windows | `C:\Users\<you>\.config\opencode\opencode.json` |
 
 Add an entry pointing at the `plugins/adaptive-fusion` **folder** (absolute path,
-forward slashes work on every platform):
+forward slashes work on every platform). The folder contains a `package.json`, so
+OpenCode loads its server, TUI and RPC parts through the `exports` map:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      // Absolute path to the plugin folder (the one containing index.ts)
+      // Absolute path to the plugin folder (the one containing package.json)
       "package": "C:/Users/you/Documents/Dev/opencode-adaptive-fusion/plugins/adaptive-fusion",
       "options": {
         // Routing target provider. Use "openrouter" for OpenRouter-only setups.
@@ -121,6 +145,14 @@ A footer indicator on the home screen and prompt input shows `● fusion: ON` /
 
 ### Updating
 
+**Option A (CLI install):**
+
+```bash
+opencode plugin update opencode-adaptive-fusion
+```
+
+**Option B (clone):**
+
 ```bash
 cd opencode-adaptive-fusion
 git pull
@@ -130,6 +162,14 @@ Then restart OpenCode. Your statistics and configuration are kept in OpenCode's
 storage, not in the repository, so updates never reset them.
 
 ### Uninstalling
+
+**Option A (CLI install):**
+
+```bash
+opencode plugin remove opencode-adaptive-fusion
+```
+
+**Option B (clone):**
 
 1. `/fusion-reset` (optional — deletes statistics, reviews, cooldowns).
 2. Remove the `plugins` entry from `~/.config/opencode/opencode.json`.
@@ -457,6 +497,7 @@ Models absent from the file are neutral (0.5, no penalty). Priors older than 90 
 | v0.8 | Tier routing (Light/Middle/Heavy, upward cascade) | Released |
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
+| **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation, token estimates | Planned |
 | v1.0 | Active auto-review scoring, benchmark refresh automation | Planned |
@@ -470,6 +511,8 @@ plugins/adaptive-fusion/index.ts   Server: hooks, learning, routing, RPC impleme
 plugins/adaptive-fusion/rpc.ts     RPC contract (typed interface between TUI and server)
 plugins/adaptive-fusion/tui.tsx    TUI: slash commands and the review panel
 plugins/adaptive-fusion/jev.ts     Jev (TypeSafe System One) client
+plugins/adaptive-fusion/package.json  Plugin package manifest (direct directory installs)
+package.json                       Plugin package manifest (git/CLI installs, exports → plugins/adaptive-fusion/)
 data/benchmarks.json               Benchmark seed (model × category priors)
 opencode.jsonc                     Intentionally registers nothing (avoids double-load)
 ```

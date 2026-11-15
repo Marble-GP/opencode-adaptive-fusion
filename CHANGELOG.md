@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.1] - 2026-11-15
+
+Packaging and release hygiene. No functional changes to the plugin logic.
+
+### Added
+- **Repository-root `package.json`**: the repository itself is now a valid OpenCode
+  plugin package — `exports` maps `.` / `./server` / `./tui` / `./rpc` into
+  `plugins/adaptive-fusion/`, and the published tarball packs `plugins/` and
+  `data/` (including the `data/benchmarks.json` seed). Git/CLI installs work
+  out of the box:
+  `opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v0.9.1'`
+- README: installation via the OpenCode CLI (`opencode plugin add` / `list` /
+  `update` / `remove`), in addition to the clone-and-register method.
+- README: verified tarball contents with `npm pack --dry-run`.
+
+### Changed
+- Source comments in `plugins/adaptive-fusion/*.ts(x)` translated from Japanese to
+  English for the open-source release. No code, identifiers, regular expressions,
+  or user-facing strings were changed.
+
 ## [0.9.0] - 2026-11-15
 
 Review-focused release. Verified live against OpenCode 2.3 on Windows.

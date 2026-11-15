@@ -1,23 +1,23 @@
 // OpenCode Adaptive Fusion - TUI part
 //
-// スラッシュコマンドを TUI 側で処理し、RPC 経由でサーバー部の状態を
-// 操作・表示する。セッションにメッセージを注入しないため、
-// エージェントの応答を誘発しない。
+// Handles slash commands on the TUI side and operates/displays the state of
+// the server part via RPC. No messages are injected into the session, so the
+// agent's response is not triggered.
 //
-// /fusion-stats      統計表示
-// /fusion-toggle     ルーティング ON/OFF
-// /fusion-config     現在の設定を表示
-// /fusion-provider   ルーティング対象プロバイダーを変更
-// /fusion-whitelist  ルーティング候補モデルのホワイトリスト編集
-// /fusion-costcap    ホワイトリスト空時の入力/出力コスト上限を編集
-// /fusion-review     応答をサマリー/モデル評価・トポロジーコスパ評価(各1〜5)。ターン指定で遡及レビュー可
-// /fusion-probe      候補モデルに一斉テストプロンプトを送信(応答評価)
-// /fusion-reset      学習統計・クールダウン・人間評価リセット
-// /fusion-reviewmodel 内部審査(shadow)の担当モデルを設定
-// /fusion-chainmode  sequential-chain 補助実行(計画注入)の切替 off/active
-// /fusion-tiermode   ティアルーティング(負荷別 Light/Middle/Heavy)の切替
-// /fusion-tiers      ティアごとのモデルグループ編成(ホワイトリスト強化版)
-// /fusion-jev-key     Jev(TypeSafe) APIキーを登録/解除(optional)
+// /fusion-stats      Show learning statistics
+// /fusion-toggle     Toggle routing ON/OFF
+// /fusion-config     Show the current configuration
+// /fusion-provider   Change the routing target provider
+// /fusion-whitelist  Edit the whitelist of routing candidate models
+// /fusion-costcap    Edit the input/output cost caps used when the whitelist is empty
+// /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
+// /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
+// /fusion-reset      Reset learning statistics, cooldowns, and human ratings
+// /fusion-reviewmodel Set the model responsible for internal (shadow) review
+// /fusion-chainmode  Toggle sequential-chain auxiliary execution (plan injection) off/active
+// /fusion-tiermode   Toggle tier routing (Light/Middle/Heavy by load)
+// /fusion-tiers      Edit the model groups per tier (whitelist on steroids)
+// /fusion-jev-key     Register/clear the Jev (TypeSafe) API key (optional)
 
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal } from "solid-js"
@@ -61,7 +61,7 @@ type FusionConfig = {
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
   jevAvailable?: boolean
-  // v0.9.0: 表示言語(ja/en)
+  // v0.9.0: display language (ja/en)
   lang?: "ja" | "en"
 }
 
@@ -95,22 +95,21 @@ export default Plugin.define({
   id: "adaptive-fusion.tui",
   setup(context) {
     const fusion = context.client.rpc(AdaptiveFusion)
-    // RPC は location スコープで登録されるため、TUI の現在ロケーションを
-    // 明示的に渡す(省略するとサーバー作業ディレクトリにフォールバックし、
-    // プラグイン未登録のロケーションを参照して rpc.unavailable になる)。
+    // RPC is registered per location scope, so the current TUI location must be
+    // passed explicitly (if omitted, it falls back to the server working directory
+    // and would reference an unregistered location, causing rpc.unavailable).
     const location = () => context.location ?? context.data.location.default()
 
-    // v0.9.0: 表示言語(ja/en)。インストールごとの既定は opencode.json の
-    // options.lang で選ぶ。保存済み設定(fusion/config の lang)が優先され、
-    // /fusion-lang で実行中にも切り替えられる。
+    // v0.9.0: display language (ja/en). Install defaults are selected via options.lang in opencode.json.
+    // Saved configuration (fusion/config's lang) takes priority and can be switched on-the-fly with /fusion-lang.
     const [lang, setLang] = createSignal<"ja" | "en">(
       (context as any).options?.lang === "en" ? "en" : "ja",
     )
     const tr = (ja: string, en: string): string =>
       lang() === "en" ? en : ja
 
-    // fusion: ON/OFF の永続表示用シグナル(初期値は起動時にRPCから取得)。
-    // jev の利用状態はバッジに出さず /fusion-config で確認する。
+    // fusion: signal for the persistent ON/OFF display (initial value is fetched from RPC on startup).
+    // Jev's availability is not shown on the badge; check it with /fusion-config.
     const [fusionEnabled, setFusionEnabled] = createSignal<boolean | undefined>(
       undefined,
     )
@@ -119,11 +118,11 @@ export default Plugin.define({
         const result: any = await fusion.config({}, { location: location() })
         if (typeof result?.config?.enabled === "boolean")
           setFusionEnabled(result.config.enabled)
-        // 保存済みの言語設定を反映(未保存なら options.lang のまま)
+        // Apply the saved language setting (if unsaved, keep options.lang)
         if (result?.config?.lang === "ja" || result?.config?.lang === "en")
           setLang(result.config.lang)
       } catch {
-        // 取得失敗時は表示しない(TUIの動作は妨げない)
+        // On fetch failure, do not display (never block the TUI)
       }
     })()
     const fusionBadge = () => {
@@ -135,22 +134,22 @@ export default Plugin.define({
         </text>
       )
     }
-    // ホーム/プロンプトのビルトインフッター(内蔵ステータスより後ろ、
-    // バージョン表示より前)に常時表示する
+    // Built-in footer shown by the home/prompt (after the built-in status,
+    // before the version display); always visible
     context.ui.slot({ append: "home.footer.status", render: fusionBadge })
     context.ui.slot({ append: "prompt.footer.status", render: fusionBadge })
 
     const currentSessionID = async (): Promise<string | undefined> => {
-      // 画面上の現在ルート(通常はセッションビュー)から取得する
+      // Get it from the current root on screen (usually the session view)
       try {
         const route: any = (context.ui as any).router?.current?.()
         const routed = route?.sessionID ?? route?.data?.sessionID ?? route?.params?.sessionID
         if (typeof routed === "string" && routed.length > 0) return routed
       } catch {
-        // ルーターが使えない環境ではactive sessionへフォールバック
+        // In environments where the router is unavailable, fall back to the active session
       }
 
-      // 実行中セッションが1つだけの場合はそれを使う
+      // If there is exactly one active session, use it
       try {
         const active: any = await (context.client as any).session?.active?.({
           location: location(),
@@ -159,7 +158,7 @@ export default Plugin.define({
         const ids = Object.keys(source ?? {}).filter((id) => typeof source[id] === "object")
         if (ids.length === 1) return ids[0]
       } catch {
-        // active sessionが取れない環境ではundefined
+        // In environments where the active session cannot be retrieved, undefined
       }
       return undefined
     }
@@ -169,9 +168,9 @@ export default Plugin.define({
       instruction: number
       accuracy: number
       completeness: number
-      // v0.9.0: コストパフォーマンス軸の平均(未収集は省略)
+      // v0.9.0: efficiency axis average (omitted when uncollected)
       efficiency?: number
-      // v0.9.0: 直近の実績列挙(未収集は省略)
+      // v0.9.0: list of recent results (omitted when uncollected)
       results?: string[]
       reason: string
       reviewerRef: string
@@ -191,7 +190,7 @@ export default Plugin.define({
     }
     type ReviewInfo = {
       sessionID: string
-      // v0.9.0: 対象ターン(0=最新, 1=1個前, …)
+      // v0.9.0: target turn (0 = latest, 1 = one turn back, ...)
       offset?: number
       category: string
       messageID: string
@@ -203,7 +202,7 @@ export default Plugin.define({
       responseLength: number
       feedbackAverage: number
       feedbackCount: number
-      // v0.9.0: ターン統計(入出力トークン/コスト/実測速度)
+      // v0.9.0: turn statistics (input/output tokens, cost, measured speed)
       turn?: TurnStatsInfo
       topology?: string
       topologyRatingAverage?: number
@@ -217,8 +216,8 @@ export default Plugin.define({
       autoReview?: AutoReviewInfo
     }
 
-    // 長文を表示する大型ダイアログ。本文だけをスクロール可能にし、
-    // タイトルと閉じるボタンは常に見えるように固定する。
+    // Large dialog for displaying long text. Only the body is scrollable;
+    // the title and close button stay fixed so they are always visible.
     const showLongText = (title: string, message: string) => {
       context.ui.dialog.set({ size: "large", centered: true })
       context.ui.dialog.show(
@@ -256,23 +255,23 @@ export default Plugin.define({
     }
 
     const closeReviewUI = () => {
-      // レビューパネルからでも、カスタムダイアログからでも閉じられるようにする
+      // Allow closing from either the review panel or a custom dialog
       try {
         (context.ui.dialog as any).clear?.()
       } catch {
-        // dialog APIが使えない組み込みではパネル側のcloseに任せる
+        // In built-ins where the dialog API is unavailable, leave closing to the panel side
       }
       try {
         (context.ui as any).panel?.close?.()
       } catch {
-        // panel APIが使えない環境では無視
+        // In environments where the panel API is unavailable, ignore it
       }
     }
 
     const ReviewPanel = (props: {
       sessionID: string
       close: () => void
-      // v0.9.0: 対象ターン(0=最新, 1=1個前, …)。省略時は 0(最新)。
+      // v0.9.0: target turn (0 = latest, 1 = one turn back, ...). Defaults to 0 (latest).
       initialOffset?: number
     }) => {
       const [offset, setOffset] = createSignal(
@@ -303,7 +302,7 @@ export default Plugin.define({
       }
       void load()
 
-      // v0.9.0: 対象ターンの移動(0=最新, 1=1個前, …)。
+      // v0.9.0: move the target turn (0 = latest, 1 = one turn back, ...).
       const shiftOffset = async (delta: number) => {
         const next = Math.max(0, offset() + delta)
         if (next === offset()) return
@@ -349,7 +348,7 @@ export default Plugin.define({
           setBusy(false)
         }
       }
-      // トポロジー(オーケストレーション形態)のコスパ評価【第2行】
+      // Cost-performance rating of the topology (orchestration shape) [second row]
       const rateTopology = async (topologyRating: number) => {
         setBusy(true)
         try {
@@ -775,7 +774,7 @@ export default Plugin.define({
                     tr("provider/model をカンマ区切りで(例: openrouter/z-ai/glm-5.3, openrouter/deepseek/...)。空でこのティアをクリア", "Comma-separated provider/model refs (e.g. openrouter/z-ai/glm-5.3, openrouter/deepseek/...). Empty clears this tier"),
                   default: (current.config.tiers?.[tier as "heavy"] ?? []).join(", "),
                 })
-                if (input === undefined) return // キャンセル
+                if (input === undefined) return // cancel
                 const models = input
                   .split(",")
                   .map((s) => s.trim())
@@ -855,8 +854,8 @@ export default Plugin.define({
               })
               return
             }
-            // v0.9.0: 対象ターンの選択(0=最新, 1=1個前, …)。
-            // 後からバグが見つかった応答も遡ってレビューできる。
+            // v0.9.0: target turn selection (0 = latest, 1 = one turn back, ...).
+            // Responses whose bugs are found later can also be reviewed retroactively.
             let initialOffset = 0
             try {
               const turnInput = await context.ui.dialog.prompt({
@@ -872,7 +871,7 @@ export default Plugin.define({
                     : 0
               }
             } catch {
-              // prompt が使えない環境では最新応答にフォールバック
+              // In environments where the prompt is unavailable, fall back to the latest response
             }
             context.ui.dialog.set({ size: "large", centered: true })
             context.ui.dialog.show(
@@ -955,7 +954,7 @@ export default Plugin.define({
               const providerID = input.trim()
               if (!providerID) return
               if (providerID === current.config.providerID) return
-              // プロバイダー変更時はホワイトリストもリセットされる
+              // Changing the provider also resets the whitelist
               const result = await fusion.config(
                 { update: { providerID, models: [] } },
                 { location: location() },

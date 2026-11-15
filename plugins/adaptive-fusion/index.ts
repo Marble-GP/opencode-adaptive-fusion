@@ -1,28 +1,28 @@
 // OpenCode Adaptive Fusion - Server part
 //
-// 企画書 Phase1 + Phase2(タスク分類)に相当するプロトタイプ。
-//  - prompt フックでタスク分類(ctx.experimental.generate.text を使用)し、セッション単位で保持する
-//  - experimental.model.resolve フックで、タスク種別 x モデルの学習スコアに基づきモデルを差し替える
-//  - http.request / http.response フックでレイテンシと成否を収集し、ctx.storage に永続化する
-//  - RPC で TUI 部(tui.tsx)に統計表示/設定変更/リセットを提供する
+// Prototype corresponding to Phase1 + Phase2 (task classification) of the proposal.
+//  - The prompt hook classifies tasks (using ctx.experimental.generate.text) and keeps the result per session
+//  - The experimental.model.resolve hook swaps models based on per-task-category x model learned scores
+//  - The http.request / http.response hooks collect latency and success/failure, persisted to ctx.storage
+//  - RPC provides stats display / config changes / reset to the TUI part (tui.tsx)
 //
-// 設定は fusion/config に永続化され、TUI(/fusion-config / /fusion-whitelist)から変更できる。
-// 優先順位: 保存済み設定 > opencode.json の options。
+// Settings are persisted to fusion/config and can be changed from the TUI (/fusion-config / /fusion-whitelist).
+// Priority: saved settings > opencode.json options.
 //
-// 統計は2層(キーには実プロバイダーを含む):
-//  - fusion/stat/<provider>/<model>            : 全体統計(フォールバック用)
-//  - fusion/task/<category>/<provider>/<model> : タスク種別統計(優先)
+// Stats have two layers (keys include the actual provider):
+//  - fusion/stat/<provider>/<model>            : overall stats (fallback)
+//  - fusion/task/<category>/<provider>/<model> : per-category stats (preferred)
 //
-// crossProvider 時は候補を全プロバイダーに拡大し、ホワイトリストは
-// `provider/model-id` の完全参照形式で持つ。
+// With crossProvider, candidates are expanded to all providers, and the whitelist
+// uses the full-reference form `provider/model-id`.
 //
-// 失敗検知と安全なフォールバック:
-//  - resolve レベルの「モデル利用不可」(Model unavailable) は session.step.failed /
-//    session.retry.scheduled イベントから検知し、該当モデルをクールダウンして対象から外す
-//  - 無料枠(quota)は品質ペナルティから除外し、長期クールダウン(6h)のみ課す
-//  - quota 失敗時はプロバイダー単位で冷却する(無料枠はアカウント単位)
-//  - 成功した HTTP 観測が来たらクールダウンを解除する(復帰検知)
-//  - rescue モード: ルーティング OFF でも、現モデルがクールダウン中なら健康なモデルへ自動退避
+// Failure detection and safe fallback:
+//  - resolve-level "model unavailable" (Model unavailable) is detected from session.step.failed /
+//    session.retry.scheduled events; the offending model is cooled down and excluded from candidates
+//  - Free-tier (quota) failures are excluded from the quality penalty and only get a long cooldown (6h)
+//  - quota failures cool down per provider (free tier is account-wide)
+//  - when a successful HTTP observation arrives, the cooldown is lifted (recovery detection)
+//  - rescue mode: even with routing OFF, if the current model is cooling down, automatically fall back to a healthy model
 
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -47,7 +47,7 @@ const REVIEW_PREFIX = "fusion/review/"
 const CONFIG_KEY = "fusion/config"
 const COOLDOWN_KEY = "fusion/cooldowns"
 const RESCUE_KEY = "fusion/rescue-attempts"
-// ベンチマークシード(既定: リポジトリルートの data/benchmarks.json)
+// Benchmark seed (default: data/benchmarks.json at the repository root)
 const BENCHMARKS_DEFAULT_RELATIVE = ["data", "benchmarks.json"]
 
 type Stat = {
@@ -61,7 +61,7 @@ type Stat = {
 
 type FeedbackStat = {
   model: { providerID: string; id: string }
-  // 生の合計(1..5)と件数を保存し、評価分布を平均値化できるようにする
+  // Store raw sums (1..5) and counts so the rating distribution can be averaged
   ratingSum: number
   count: number
   updatedAt: string
@@ -70,68 +70,68 @@ type FeedbackStat = {
 
 type AutoReviewStat = {
   model: { providerID: string; id: string }
-  // 審査を実行したモデル(自己採点の偏り検出用)
+  // Model that ran the review (for detecting self-scoring bias)
   reviewerRef?: string
   total: number
   lastAt: number
   instruction: number
   accuracy: number
   completeness: number
-  // v0.9.0: コストパフォーマンス軸(1..5 の合計と収集件数)。
-  // 旧データ(efficiency 収集前)は 0/0 = 未収集扱い。
+  // v0.9.0: cost-performance axis (1..5 sum and sample count).
+  // Old data (before efficiency collection) is 0/0 = uncollected.
   efficiency: number
   efficiencyCount: number
-  // v0.9.0: 「応答が成し遂げた実績」の列挙(直近の審査分を保持)。
-  // 旧データは空配列。
+  // v0.9.0: Enumeration of "what the response actually accomplished" (keeps the latest reviews).
+  // Old data is an empty array.
   results: string[]
   reasons: string[]
   updatedAt: string
   category?: string
 }
 
-// TUI/RPC へ渡す表示用スナップショット(ローリング平均)
+// Display snapshot for TUI/RPC (rolling averages)
 type AutoReviewSnapshot = {
   average: number
   instruction: number
   accuracy: number
   completeness: number
-  // v0.9.0: コストパフォーマンス軸の平均(未収集はキーごと省略)
+  // v0.9.0: cost-performance axis average (omitted per key when uncollected)
   efficiency?: number
-  // v0.9.0: 直近の実績列挙(未収集はキーごと省略)
+  // v0.9.0: enumeration of recent accomplishments (omitted per key when uncollected)
   results?: string[]
   reason: string
   reviewerRef: string
   total: number
 }
 
-// トポロジー(オーケストレーション形態)の観測統計(v0.7a)。
-// 「判定した形態」と「実際にその形態で動いた結果」を蓄積し、後続版の
-// 選定スコア合成(w2 記録コスパ / w3 自動観測)の土台にする。
+// Observed stats for topologies (orchestration shapes) (v0.7a).
+// Accumulate "the shape that was decided" and "the results when it actually ran in that shape",
+// as the foundation for later selection-score composition (w2 manual cost-performance / w3 automatic observation).
 type TopologyStat = {
   topology: string
   category?: string
   count: number
   ok: number
   totalMs: number
-  // 内部審査(autoReview)のスコア合計(5点満点×回数)。応答1件=最大5
+  // Inner-review (autoReview) score sum (5 points max x count). 1 response = max 5
   sumQuality: number
   qualityCount: number
-  // 人間による「この形態のコスパは?」1〜5の合計(/fusion-review 第2行、D-3)
+  // Human "how cost-effective is this shape?" 1-5 sum (/fusion-review row 2, D-3)
   sumCostPerformance: number
   costPerformanceCount: number
-  // Jev Choice の確率分布の合計(D-4 の w1 事前)。判定1回=確率1を各形態に分配
+  // Sum of Jev Choice probability distributions (the D-4 w1 prior). 1 judgment = probability 1 distributed across shapes
   sumJevPrior: number
   jevPriorCount: number
-  // 補助呼び出し(v0.7a 完全版): chain の planner など、主応答以外の呼出数と所要時間
+  // Auxiliary calls (full v0.7a): call count and duration other than the main response, e.g. chain planner
   auxCalls: number
   auxMs: number
-  // 最後に実行された時刻(ms)
+  // Time of last execution (ms)
   lastUsedAt: number
   updatedAt: string
 }
 
-// Jev へ渡すトポロジー選択肢の定義(v0.7a: single / router / sequential-chain のみ)。
-// criteria は「どんな依頼が来たらこの形態を選ぶべきか」の対比定義。
+// Definitions of the topology choices passed to Jev (v0.7a: single / router / sequential-chain only).
+// criteria is a contrastive definition of "which requests should pick this shape".
 const TOPOLOGY_CATALOG: Record<string, string> = {
   single:
     "単一の質問・編集・説明など、1つのモデル応答で十分な依頼。分解・並列化の利点がない、または小さすぎる",
@@ -146,9 +146,9 @@ const TOPOLOGY_CATALOG: Record<string, string> = {
 }
 const KNOWN_TOPOLOGIES = Object.keys(TOPOLOGY_CATALOG)
 
-// ベンチマーク事前(v0.6): 下馬評スコア(0〜1)をモデル×カテゴリで保持する。
-// 観測成功率を Beta(benchmark * k, (1 - benchmark) * k) 事前で平滑化する。
-// 既定の空値(= ファイル不在 / k=0)では現行の Laplace 平滑化と同じ結果になる。
+// Benchmark priors (v0.6): keep prior scores (0-1) per model x category.
+// Smooth the observed success rate with a Beta(benchmark * k, (1 - benchmark) * k) prior.
+// With the default empty value (= file missing / k=0) the result matches the current Laplace smoothing.
 type BenchmarkEntry = Partial<
   Record<
     | "coding"
@@ -182,55 +182,55 @@ type FusionConfig = {
   classifierModel: string | null
   kinds: string[]
   models: string[]
-  // 単一プロバイダー時はモデルID、crossProvider 時は
-  // `provider/model-id` 完全参照形式。空なら全候補。
-  maxInputCost: number // USD/1M tokens。ホワイトリストが空の場合のみ適用
-  maxOutputCost: number // USD/1M tokens。0なら無料モデルのみ
-  // ベンチマーク事前の強さ(ベイズ事前の k)。0 で機能OFF = 現行の平滑化
+  // Model ID when a single provider is used;
+  // full-reference form `provider/model-id` with crossProvider. Empty = all candidates.
+  maxInputCost: number // USD/1M tokens. Applied only when the whitelist is empty
+  maxOutputCost: number // USD/1M tokens. 0 = only free models
+  // Strength of the benchmark prior (k of the Bayesian prior). 0 disables it = current smoothing
   benchmarkPriorWeight: number
-  // ベンチマークシードのパス。既定はプラグインからの相対パス
+  // Path of the benchmark seed. Default is relative to the plugin
   benchmarksFile: string
-  // 内部審査(shadow)の担当モデル。未指定なら classifierModel と同じフォールバック経路
+  // Model in charge of inner review (shadow). Defaults to the same fallback path as classifierModel
   reviewModel: string | null
-  // Jev(TypeSafe)統合。auto = APIキー検出で有効化 / off = 常に従来経路
+  // Jev (TypeSafe) integration. auto = enabled when an API key is detected / off = always the legacy path
   jevMode: "auto" | "off"
-  // トポロジー判定。auto = Jev/実績で選択 / fixed = 常に single(従来動作)
+  // Topology selection. auto = choose via Jev/track record / fixed = always single (legacy behavior)
   topologyMode: "auto" | "fixed"
-  // 1応答あたりの補助呼び出し上限(コストガード)。chain は3以上必要
+  // Upper limit of auxiliary calls per response (cost guard). chain requires 3 or more
   maxTopologyCalls: number
-  // 実行を許可するトポロジーのホワイトリスト(段階リリースと連動)
+  // Whitelist of topologies allowed to run (tied to the staged rollout)
   allowedTopologies: string[]
-  // トポロジー選定スコアの重み(v0.7a/D-4)。
-  //   score = w1 × Jev事前確率 + w2 × 人間コスパ評価 + w3 × 自動観測(品質/ok率)
-  // Jev キー無し時は w1 を自動で 0 扱い、w2/w3 のみで選択する。
+  // Weights of the topology selection score (v0.7a/D-4).
+  //   score = w1 x Jev prior probability + w2 x human cost-performance + w3 x automatic observation (quality/ok rate)
+  // Without a Jev key, w1 is treated as 0 automatically and selection uses w2/w3 only.
   topologyWeightJev: number
   topologyWeightHumanCP: number
   topologyWeightAuto: number
-  // sequential-chain の補助実行(v0.7a 完全版)。
-  // off = 判定と記録のみ(現行動作)/ active = chain 選択時に planner を実行し、
-  // 計画を主モデルの system へ「参考」として注入(context フック、履歴は汚さない)
+  // Auxiliary execution of sequential-chain (full v0.7a).
+  // off = selection and recording only (current behavior) / active = when chain is selected, run the planner
+  // and inject the plan into the main model's system prompt as "reference" (context hook, does not pollute history)
   chainMode: "off" | "active"
-  // ティアルーティング(v0.8、Copilot Fusion / HydraFusion 方式の負荷別選択)。
-  // off = 従来動作 / manual = ユーザー定義ティア / auto = ベンチマークから3分割導出
+  // Tier routing (v0.8, load-based selection à la Copilot Fusion / HydraFusion).
+  // off = legacy behavior / manual = user-defined tiers / auto = derived by trisecting the benchmark
   tierMode: "off" | "manual" | "auto"
-  // ティアごとのモデルグループ(ホワイトリストの強化版)。
-  // 各層に複数の provider/model を設定でき、層内では既存の statScore+探索が働く。
+  // Model groups per tier (an enhanced whitelist).
+  // Each tier can hold multiple provider/model entries; within a tier, the existing statScore+exploration applies.
   tiers: { heavy: string[]; middle: string[]; light: string[] }
-  // 表示言語(v0.9.0)。インストールごとに options.lang で選択でき、
-  // /fusion-lang でも切り替えられる。既定は ja。
+  // Display language (v0.9.0). Chosen per install via options.lang,
+  // and can also be switched with /fusion-lang. Default is ja.
   lang: "ja" | "en"
 }
 
-// 負荷帯(タスク負荷・知能負荷の3段階)。diffculty score 0-100 を
-// TIER_THRESHOLD_* で3分割する。
+// Load bands (three levels of task/intelligence load). The difficulty score 0-100 is
+// split into three tiers by TIER_THRESHOLD_*.
 type TierName = "heavy" | "middle" | "light"
 const TIER_NAMES: TierName[] = ["heavy", "middle", "light"]
 const TIER_THRESHOLD_MIDDLE = 34
 const TIER_THRESHOLD_HEAVY = 67
 
-// 内部審査(autoReview)のスキップ記録(A-2)。
-// 「審査できなかった」ことを reviewerRef 付きで永続化し、
-// shadow 集計の盲点(審査漏れ)を可視化する。
+// Inner review (autoReview) skip log (A-2).
+// Persists the fact that a review could not run (with reviewerRef),
+// surfacing the blind spots of the shadow aggregation (missed reviews).
 type AutoSkipStat = {
   total: number
   recent: { at: string; reason: string; reviewerRef: string }[]
@@ -238,12 +238,12 @@ type AutoSkipStat = {
 }
 
 const DEFAULT_CATEGORIES = [
-  "coding", // 実装・コード編集
-  "debugging", // エラー・バグ修正
-  "review", // レビュー・検証
-  "research", // 調査・質問・説明
-  "writing", // ドキュメント・文章
-  "ops", // シェル・環境構築・実行
+  "coding", // implementation / code editing
+  "debugging", // errors / bug fixes
+  "review", // review / verification
+  "research", // investigation / questions / explanations
+  "writing", // docs / prose
+  "ops", // shell / environment setup / execution
 ]
 
 const clamp = (value: number, min: number, max: number) =>
@@ -252,8 +252,8 @@ const clamp = (value: number, min: number, max: number) =>
 const num = (value: unknown, fallback: number) =>
   typeof value === "number" ? value : fallback
 
-// ティア設定(v0.8)のバリデーション。provider/model 形式の文字列だけを受け入れ、
-// 不正な値・不足層は空配列に正規化する(opencode.json options / RPC update 共通)。
+// Tier config (v0.8) validation. Accepts only provider/model-formatted strings;
+// invalid values / missing tiers are normalized to empty arrays (shared by opencode.json options / RPC update).
 const sanitizeTiers = (raw: unknown):
   { heavy: string[]; middle: string[]; light: string[] } => {
   const out: { heavy: string[]; middle: string[]; light: string[] } = {
@@ -281,7 +281,7 @@ export default Plugin.define({
   id: "adaptive-fusion",
   async setup(ctx) {
     // ------------------------------------------------------------------
-    // 設定(優先順位: 保存済み fusion/config > opencode.json の options)
+    // Settings (priority: saved fusion/config > opencode.json options)
     // ------------------------------------------------------------------
     const cfg: FusionConfig = {
       enabled: ctx.options.enabled === true,
@@ -354,21 +354,21 @@ export default Plugin.define({
         return raw === "manual" || raw === "auto" || raw === "off" ? raw : "off"
       })(),
       tiers: sanitizeTiers(ctx.options.tiers),
-      // 表示言語。opencode.json の options.lang でインストール単位に選択できる
-      // (保存済み設定 > options の優先順位は他項目と同じ)。
+      // Display language. Can be chosen per install via opencode.json options.lang
+      // (same saved-settings > options priority as other items).
       lang: ctx.options.lang === "en" ? "en" : "ja",
     }
 
-    // 表示言語ヘルパー(v0.9.0)。第1引数が日本語、第2引数が英語。
-    // 設定は TUI/RPC からも変更でき、即座に反映される。
+    // Display-language helper (v0.9.0). First argument is Japanese, second is English.
+    // Also changeable from TUI/RPC, applied immediately.
     const tr = (ja: string, en: string): string =>
       cfg.lang === "en" ? en : ja
 
-    // 保存済み設定の適用(検証済みの値のみ)。
-    // setup 時の復元と、prompt フックでの再同期(TUI 側インスタンスが
-    // 永続化した変更をサーバー側へ反映する。v0.8.1)の両方から使う。
-    // 注意: kinds は setup 後に参照キャプチャされるため、差し替えではなく
-    // 同一配列への破壊的更新で反映する。
+    // Apply saved settings (only validated values).
+    // Used both at setup-time for restore and at prompt-time for resync (the TUI-side instance may
+    // have persisted changes to reflect server-side, v0.8.1).
+    // Note: kinds is captured by reference after setup, so it must not be swapped;
+    // apply changes by destructively mutating the same array.
     const applyPersistedConfig = (saved: unknown): boolean => {
       if (!saved || typeof saved !== "object") return false
       const s = saved as Record<string, unknown>
@@ -444,11 +444,11 @@ export default Plugin.define({
     applyPersistedConfig(await ctx.storage.get(CONFIG_KEY))
 
     // ------------------------------------------------------------------
-    // Jev(TypeSafe System One)キーの管理
+    // Jev (TypeSafe System One) key management
     // ------------------------------------------------------------------
-    // キーは storage["fusion/jev-key"] か TYPESAFE_API_KEY 環境変数から読む。
-    // 優先順位: storage(ダイアログ登録) > 環境変数。
-    // 空文字は「未登録」を意味する(storage に delete が無いため空文字で無効化)。
+    // The key is read from storage["fusion/jev-key"] or the TYPESAFE_API_KEY environment variable.
+    // Priority: storage (dialog registration) > environment variable.
+    // An empty string means "not registered" (storage has no delete, so disable via empty string).
     let jevStoredKey: string | undefined
     {
       const stored = await ctx.storage.get(JEV_KEY_KEY)
@@ -459,7 +459,7 @@ export default Plugin.define({
       const env = process.env.TYPESAFE_API_KEY?.trim()
       return jevStoredKey ?? (env && env.length > 0 ? env : undefined)
     }
-    // キーの有無 + jevMode=auto の両方を満たすときだけ Jev を使う(縮退運転)
+    // Jev is used only when both a key is present and jevMode=auto (graceful degradation otherwise)
     const jevAvailable = (): boolean =>
       cfg.jevMode !== "off" && Boolean(jevEffectiveKey())
     const jevClient = (): JevClient | undefined => {
@@ -467,10 +467,10 @@ export default Plugin.define({
       return cfg.jevMode !== "off" && key ? new JevClient(key) : undefined
     }
 
-    // ルーティング対象のリクエスト種別。既定はエージェントループのみ。
+    // Request kinds eligible for routing. Default is agent-loop only.
     const kinds = cfg.kinds
 
-    // タスク分類カテゴリ(opencode.json の options のみ。動的変更は不可)
+    // Task classification categories (opencode.json options only; not changeable dynamically)
     const categories: string[] =
       Array.isArray(ctx.options.categories) &&
       ctx.options.categories.every((c) => typeof c === "string") &&
@@ -478,7 +478,7 @@ export default Plugin.define({
         ? (ctx.options.categories as string[])
         : [...DEFAULT_CATEGORIES]
 
-    // キーには実プロバイダーを含む(既存の opencode 統計と同一形式を維持)
+    // Keys include the actual provider (same format as opencode's existing stats)
     const refFor = (providerID: string, modelID: string) =>
       `${providerID}/${modelID}`
     const keyFor = (providerID: string, modelID: string) =>
@@ -568,7 +568,7 @@ export default Plugin.define({
         stat,
       )
     }
-    // 内部審査のスキップ記録(A-2)。審査できなかった事実を reviewerRef 付きで残す。
+    // Inner-review skip log (A-2). Records the fact that a review could not run, with reviewerRef.
     const loadAutoSkip = async (): Promise<AutoSkipStat | undefined> => {
       const saved = await ctx.storage.get(AUTO_SKIP_KEY)
       if (!saved || typeof saved !== "object") return undefined
@@ -607,56 +607,55 @@ export default Plugin.define({
         await ctx.storage.set(AUTO_SKIP_KEY, existing)
         logRoute(`AUTO review skip recorded: ${reason}`)
       } catch {
-        // スキップ記録の失敗は通常処理を妨げない
+        // Failure to record a skip must not block normal processing
       }
     }
     // ------------------------------------------------------------------
-    // 失敗検知(cooldown)→ 安全なフォールバック
+    // Failure detection (cooldown) -> safe fallback
     // ------------------------------------------------------------------
-    // resolve レベルの「モデル利用不可」(Model unavailable)は HTTP に到達せず
-    // 統計に現れない。session.step.failed / session.retry.scheduled イベントの
-    // エラーメッセージから該当モデルを検知し、一定時間ルーティング対象から
-    // 外す(指数バックオフ)。成功した HTTP 観測が来たら解除する。
-    // 無料枠(opencode / openrouter 共にアカウント単位)は、1モデルがクオータ
-    // 制限に触れた時点で該当プロバイダーの無料モデル全滅とみなし、
-    // プロバイダー単位のタイマー付き利用不可フラグで冷却する。
+    // resolve-level "model unavailable" (Model unavailable) never reaches HTTP
+    // and is invisible to stats. The offending model is detected from the
+    // session.step.failed / session.retry.scheduled event error message and excluded
+    // from routing targets for a while (exponential backoff). A successful HTTP observation lifts it.
+    // The free tier (account-wide for both opencode / openrouter): once one model hits quota,
+    // all free models of that provider are treated as down,
+    // and cooled down via a provider-scoped, timer-based unavailable flag.
     const cooldowns = new Map<
       string,
       {
         until: number
         failures: number
         quota: boolean
-        // 検証未了フラグ(v0.8.1)。タイマー満了だけでは「回復」と扱わない。
-        // 実機への最小プローブが成功した時点で冷却を解除する。
-        // (タイマーは推測でしかなく、実際の利用制限は別の窓で解けるため。
-        //  未検証のまま戻ると Model unavailable で強制停止を繰り返す)
+        // needsVerify flag (v0.8.1). Timer expiry alone does not count as "recovered".
+        // The cooldown is lifted once a minimal real probe succeeds.
+        // (The timer is only a guess; actual usage limits may lift in a different window.
+        //  Returning unverified leads to repeated forced stops via Model unavailable)
         needsVerify: boolean
         lastVerifyAt?: number
       }
     >()
-    // プロバイダー単位の利用不可フラグ(タイマー付き)。
-    // OpenCode / OpenRouter の無料枠はアカウント単位のため、クオータ制限に
-    // 触れた時点で該当プロバイダーの無料モデルは全滅する。モデル単位では
-    // なくプロバイダーごと冷却する。
+    // Provider-scoped unavailable flag (timer-based).
+    // The free tier of OpenCode / OpenRouter is account-wide, so once quota is hit,
+    // all free models of that provider go down. Cool down per provider, not per model.
     const providerCooldowns = new Map<
       string,
       { until: number; quota: boolean }
     >()
-    const COOLDOWN_BASE_MS = 10 * 60_000 // resolve失敗: 10分から指数バックオフ
+    const COOLDOWN_BASE_MS = 10 * 60_000 // resolve failure: exponential backoff starting at 10 minutes
     const COOLDOWN_MAX_MS = 6 * 60 * 60_000
-    // 無料枠・クオータ: 1時間ごと。タイマー満了後は実機プローブで検証し、
-    // 通ればプールへ復帰、通らなければさらに1時間延長(検証付き復帰)。
-    // 長い固定タイマーだと「タイマーは切れたが制限は未解除」で
-    // Model unavailable の強制停止を繰り返したため、短周期+検証方式へ変更。
+    // Free tier / quota: every hour. After timer expiry, verify with a real probe;
+    // pass -> back into the pool, fail -> extended by another hour (verified recovery).
+    // With a long fixed timer, "the timer expired but the limit was not lifted"
+    // led to repeated forced stops via Model unavailable, so this moved to a short cycle + verification.
     const QUOTA_COOLDOWN_MS = 60 * 60_000
 
-    // --- Rescue復帰 ---
-    // セッションが rescue で他モデルへ退避した場合、元モデルの冷却が
-    // 解除されたときに次のプロンプトで自動復帰させるための記録。
+    // --- Rescue restore ---
+    // When a session fell back to another model via rescue, record it so the
+    // original model can be automatically restored on the next prompt once its cooldown lifts.
     const rescueAttempts = new Map<string, { originalRef: string; deadline: number }>()
-    const RESCUE_WINDOW_MS = 24 * 60 * 60_000 // 24時間だけ有効
+    const RESCUE_WINDOW_MS = 24 * 60 * 60_000 // valid for 24 hours only
 
-    // プロンプト直前のフックで rescue 復帰を判定する。
+    // Decide rescue restore in the hook just before the prompt.
     const maybeRestoreFromRescue = (sessionID: string) => {
       const entry = rescueAttempts.get(sessionID)
       if (!entry) return
@@ -667,15 +666,15 @@ export default Plugin.define({
         void persistRescue()
         return
       }
-      // entry.originalRef は provider/model の完全参照。model側に
-      // スラッシュが含まれうるため、最初のスラッシュで分割する
+      // entry.originalRef is a full provider/model reference. The model side may
+      // contain slashes, so split on the first slash
       const slash = entry.originalRef.indexOf("/")
       const origProv = entry.originalRef.slice(0, slash)
       const origMod = entry.originalRef.slice(slash + 1)
       const modelRef = entry.originalRef
-      // 復帰判定は cool() に一本化する(v0.8.1)。cool() はタイマーに加えて
-      // 検証未了(needsVerify)とプロバイダー単位の冷却も見るため、
-      // 「タイマーは切れたが利用制限は未解除」のモデルへ戻る事例を防ぐ。
+      // Restore decisions are unified into cool() (v0.8.1). cool() checks not only the timer
+      // but also needsVerify and provider-scoped cooldowns,
+      // preventing returns to models whose timer expired but whose limit was not lifted.
       if (!cool(modelRef)) {
         logRoute(`RESCUE restore ${sessionID} -> ${entry.originalRef} (recovered)`)
         return { providerID: origProv, id: origMod, ref: entry.originalRef }
@@ -684,26 +683,26 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
-    // ルーティング決定のログ(直近20件。stats に表示。デバッグ用)
+    // Routing decision log (latest 20 entries. Shown in stats. For debugging)
     // ------------------------------------------------------------------
     const routeLog: string[] = []
     const logRoute = (line: string) => {
       routeLog.push(`${new Date().toISOString().slice(11, 19)} ${line}`)
-      // v0.8.1: 20件では失敗連鎖の調査中に証拠が蒸発した(実測)ため拡大。
+      // v0.8.1: 20 entries caused evidence to evaporate while investigating failure cascades (measured), so enlarged.
       if (routeLog.length > 200) routeLog.splice(0, routeLog.length - 200)
     }
 
-    // クールダウン(利用不可フラグ)の永続化:
-    // プラグインのホットリロードでメモリが消えても、死亡済みモデルに
-    // 再び当たらないよう fusion/cooldowns に保存し、setup 後半で復元する。
+    // Persisting cooldowns (unavailable flags):
+    // Even if the plugin hot-reloads and memory is lost, models already known to be dead
+    // are saved to fusion/cooldowns and restored late in setup so they are not hit again.
     //
-    // v0.8.1 追加(実機検証済みの問題): サーバープロセスは同一プラグインを
-    // 2インスタンスでロードすることがあり(role=server の二重ロードをログで
-    // 実証)、フックを持たない側が「復元時点の古いマップ」を persist すると
-    // kv が丸ごと上書きされ、フック側が記録した冷却が消える
-    // (gemini 冷却消失事故の再現実験で実証)。
-    // そのため persist は「kv をベースにメモリをマージ」方式にする。
-    // 削除は tombstone で貫通させる(成功時の clearCooldown が復活しないように)。
+    // Added in v0.8.1 (problem verified in production): the server process may load the same plugin
+    // as 2 instances (the role=server double load was confirmed in logs), and when the instance
+    // without hooks persists the "stale map captured at restore time",
+    // the entire kv gets overwritten and cooldowns recorded by the hooked side disappear
+    // (reproduced in a gemini cooldown-loss experiment).
+    // Therefore persist is a "merge memory onto the kv" scheme.
+    // Deletes go through a tombstone (so clearCooldown's success-time delete cannot resurrect).
     const cooldownTombstones = new Map<string, number>()
     const TOMBSTONE_TTL_MS = 25 * 60 * 60_000
     const tomb = (key: string) => {
@@ -716,7 +715,7 @@ export default Plugin.define({
     }
     const persistCooldowns = async () => {
       const now = Date.now()
-      // ベース: 直近の kv(他インスタンスが記録した冷却を消さない)
+      // Base: latest kv (does not erase cooldowns recorded by other instances)
       let models: Record<string, unknown> = {}
       let providers: Record<string, unknown> = {}
       try {
@@ -729,14 +728,14 @@ export default Plugin.define({
             providers = { ...(s.providers as Record<string, unknown>) }
         }
       } catch {
-        // 読めなければメモリのみで書く(従来動作)
+        // If unreadable, write memory-only (legacy behavior)
       }
-      // メモリ側の有効エントリで上書きマージ
+      // Overwrite-merge with the live entries on the memory side
       for (const [ref, c] of cooldowns)
         if (c.until > now || c.needsVerify === true) models[ref] = c
       for (const [id, p] of providerCooldowns)
         if (p.until > now) providers[id] = p
-      // tombstone: メモリで明示削除されたキーは kv に残っていても落とす
+      // tombstone: keys explicitly deleted in memory are dropped even if still present in kv
       const tnow = Date.now()
       for (const [key, ts] of cooldownTombstones) {
         if (tnow - ts > TOMBSTONE_TTL_MS) {
@@ -765,8 +764,8 @@ export default Plugin.define({
             v &&
             typeof v === "object" &&
             typeof v.until === "number" &&
-            // タイマー満了しても検証未了(needsVerify)の冷却は復元する。
-            // 落とすと未回復のモデルが健全扱いになり強制停止の種になる。
+            // Restore cooldowns with needsVerify even if the timer expired.
+            // Dropping them makes unrecovered models look healthy and seeds forced stops.
             (v.until > Date.now() || v.needsVerify === true)
           )
             target.set(key, value)
@@ -776,11 +775,11 @@ export default Plugin.define({
       restore(s.providers, providerCooldowns)
     }
 
-    // rescue復帰の保留エントリーも永続化する。
-    // プラグインのホットリロードでメモリが消えても復帰判定が失われないようにする。
-    // v0.8.1: クールダウンと同様にマージ方式(他インスタンスの stale 上書き対策)。
-    // 削除は「メモリに無く deadline も過ぎた」場合だけ落とすのではなく、
-    // 明示削除を tombstones マップで貫通させる。
+    // Persist pending rescue-restore entries as well.
+    // So restore decisions are not lost even if the plugin hot-reloads and memory is wiped.
+    // v0.8.1: same merge scheme as cooldowns (guards against stale overwrites from other instances).
+    // Deletes are not just "dropped when missing from memory and deadline passed";
+    // explicit deletes go through the tombstones map.
     const rescueTombstones = new Map<string, number>()
     const persistRescue = async () => {
       const now = Date.now()
@@ -790,7 +789,7 @@ export default Plugin.define({
         if (saved && typeof saved === "object")
           attempts = { ...(saved as Record<string, unknown>) }
       } catch {
-        // 読めなければメモリのみで書く
+        // If unreadable, write memory-only
       }
       for (const [sessionID, entry] of rescueAttempts)
         if (entry.deadline > now) attempts[sessionID] = entry
@@ -826,7 +825,7 @@ export default Plugin.define({
       }
     }
 
-    // 失敗の種別: quota(無料枠・レート制限)は品質ペナルティから除外する
+    // Failure types: quota (free tier / rate limit) is excluded from the quality penalty
     const classifyFailure = (error: {
       message?: unknown
       status?: unknown
@@ -851,31 +850,31 @@ export default Plugin.define({
       const c = cooldowns.get(ref)
       if (c !== undefined) {
         if (c.until > Date.now()) return true
-        // タイマー満了でも検証未了なら「未回復」扱い(v0.8.1)。
-        // タイマーは目安でしかなく、実際の利用制限は別の窓で解けるため、
-        // 未検証のモデルに戻ると Model unavailable で強制停止を繰り返した。
-        // 実機プローブの成功(VERIFY ok)だけが冷却解除の条件。
+        // Even if the timer has expired but needsVerify is set, treat it as "not recovered" (v0.8.1).
+        // The timer is only a rough guide; actual usage limits may lift in a different window,
+        // and returning to an unverified model led to repeated forced stops via Model unavailable.
+        // Only a successful real probe (VERIFY ok) lifts the cooldown.
         if (c.needsVerify) {
           scheduleVerification(ref)
           return true
         }
       }
-      // モデル単位のクールダウンが切れていても、プロバイダー単位の
-      // クオータ冷却(無料枠はアカウント単位で全滅)中なら利用不可。
-      // ただしプロバイダー冷却は「無料モデル」だけに適用する(v0.8.1)。
-      // クオータ制限は無料枠の話で、同プロバイダーの有料モデルは別枠。
-      // 有料モデルまで巻き込むと退避先が皆無になり、
-      // Model unavailable の強制停止の種になった。
+      // Even if per-model cooldowns have expired, the provider-scoped
+      // quota cooldown (free tier goes down account-wide) means unavailable.
+      // Note: provider cooldown applies only to "free models" (v0.8.1).
+      // Quota limits are about the free tier; paid models of the same provider are a separate bucket.
+      // Sweeping paid models in too left no fallback targets,
+      // seeding forced stops via Model unavailable.
       if (providerCool(ref.slice(0, ref.indexOf("/")))) return isFreeRef(ref)
       return false
     }
-    // 無料モデルの判定(idの命名規則による簡易判定)。
-    // openrouter は ":free" 接尾辞、opencode は "-free" 接尾辞。
+    // Detect free models (simple heuristic based on id naming).
+    // openrouter uses the ":free" suffix, opencode uses the "-free" suffix.
     const isFreeRef = (ref: string) =>
       ref.endsWith(":free") || ref.endsWith("-free")
-    // プロバイダー単位の冷却判定。OpenCode / OpenRouter の無料枠は
-    // アカウント単位のため、1モデルがクオータ制限に触れた時点で
-    // そのプロバイダーの無料モデル全滅とみなす。
+    // Provider-scoped cooldown decision. The free tier of OpenCode / OpenRouter
+    // is account-wide, so the moment one model hits quota,
+    // all free models of that provider are treated as down.
     const providerCool = (providerID: string) => {
       const p = providerCooldowns.get(providerID)
       return p !== undefined && p.until > Date.now()
@@ -903,7 +902,7 @@ export default Plugin.define({
         quota: cls === "quota",
         needsVerify: true,
       })
-      // クオータ制限はプロバイダー単位で冷却(無料枠全滅前提に)
+      // Quota limits cool down per provider (assuming the free tier goes down together)
       if (cls === "quota") markProviderCool(ref.slice(0, ref.indexOf("/")), true)
       void persistCooldowns()
       if (ctx.options.debug === true)
@@ -913,34 +912,34 @@ export default Plugin.define({
     }
     const clearCooldown = (ref: string): boolean => {
       const existed = cooldowns.delete(ref)
-      // プロバイダー単位の冷却を解除するのは「無料モデル」の成功だけ(v0.8.1)。
-      // 有料モデルの成功は無料枠の制限解除を意味しない。
-      // (無料モデルはプロバイダー冷却とモデル冷却の両方に守られるため、
-      //  有料成功でプロバイダー冷却が消えると未検証の無料モデルが
-      //  候補に復帰し、Model unavailable の種になり得た)
+      // Only "free model" success lifts a provider-scoped cooldown (v0.8.1).
+      // Success of a paid model does not imply the free tier's limit was lifted.
+      // (Free models are guarded by both the provider cooldown and the model cooldown,
+      //  so if a paid success erased the provider cooldown, unverified free models
+      //  would return as candidates and could seed Model unavailable)
       let providerExisted = false
       if (isFreeRef(ref)) {
         const pid = ref.slice(0, ref.indexOf("/"))
         providerExisted = providerCooldowns.delete(pid)
         if (providerExisted) tomb(`p:${pid}`)
       }
-      // 削除が発生したキーは tombstone に入れる。マージ方式の persist でも
-      // kv に残る古いエントリや他インスタンスの再書き込みに負けないように。
+      // Deleted keys go into the tombstone. Even with the merge-style persist,
+      // they won't lose to stale entries remaining in kv or to rewrites from other instances.
       if (existed) tomb(`m:${ref}`)
       void persistCooldowns()
-      // 解除が発生したかを返す(観測ログ用)
+      // Return whether a lift occurred (for the observation log)
       return existed || providerExisted
     }
 
     // ------------------------------------------------------------------
-    // 冷却の検証付き解除(v0.8.1)
+    // Verified lifting of cooldowns (v0.8.1)
     // ------------------------------------------------------------------
-    // タイマー満了 = 回復 ではない(利用制限は別の窓で解ける)ため、
-    // needsVerify の付いた冷却はタイマー満了後も「未回復」扱いにし、
-    // 実機への最小プローブが通った場合にだけ冷却を解除する。
-    // 検証は1時間周期(QUOTA_COOLDOWN_MS ごと)で行い、失敗したら
-    // さらに1時間延長して健康モデルへフォールバックし続ける。
-    const VERIFY_RETRY_MS = 10 * 60_000 // 再検証の最低間隔(連発防止)
+    // Timer expiry != recovery (limits may lift in a different window), so
+    // cooldowns with needsVerify are treated as "not recovered" even after timer expiry,
+    // and are lifted only when a minimal real probe passes.
+    // Verification runs on a 1-hour cycle (every QUOTA_COOLDOWN_MS); on failure
+    // it is extended by another hour and keeps falling back to healthy models.
+    const VERIFY_RETRY_MS = 10 * 60_000 // minimum interval between re-verifications (prevents bursts)
     const VERIFY_TIMEOUT_MS = 10_000
     const verifyingNow = new Set<string>()
 
@@ -967,7 +966,7 @@ export default Plugin.define({
           ])
           const text = String(result?.text ?? "").trim()
           if (text.length > 0) {
-            // 検証成功: 実際に制限が解けた証拠なので冷却を解除する
+            // Verify success: proof the limit actually lifted, so clear the cooldown
             clearCooldown(ref)
             logRoute(`VERIFY ok ${ref} (cooldown cleared)`)
           } else {
@@ -975,7 +974,7 @@ export default Plugin.define({
             logRoute(`VERIFY empty ${ref} (cooldown +1h)`)
           }
         } catch (error) {
-          // まだ利用不可: 1時間延長し、検証状態は維持する
+          // Still unavailable: extend by 1 hour, keeping the verification state
           entry.until = Date.now() + QUOTA_COOLDOWN_MS
           logRoute(
             `VERIFY fail ${ref}: ${String(error).slice(0, 60).replace(/\n/g, " ")} (+1h)`,
@@ -996,21 +995,21 @@ export default Plugin.define({
         }) as AsyncIterable<{ type: string; data?: any }>) {
           const message: string = event.data?.error?.message ?? ""
           const match = /^Model unavailable:\s*(\S+)/.exec(message)
-          // メッセージ形式に関係なく失敗モデルを特定する(v0.8.1)。
-          // "Model unavailable: <ref>" 以外の形のモデルエラーでも
-          // 冷却+退避が働くようにする(実観測では session.step.failed 自体が
-          // 発火しない環境があるため、発火する環境での予防も兼ねる)。
+          // Identify the failed model regardless of message format (v0.8.1).
+          // Cooldown + fallback must work even for model errors that are not of the
+          // "Model unavailable: <ref>" shape (in some environments session.step.failed itself
+          // never fires; this also covers prevention for environments where it does).
           let ref: string | undefined = match?.[1]
           if (!ref) {
             const sid = event.data?.sessionID
             if (typeof sid !== "string") continue
-            // 誤 attribution 対策(v0.8.1): session.model は rescue の
-            // switchModel で既に健康モデルへ書き替わっている可能性があり、
-            // それを犯人にすると健康モデルが誤って冷却される。
-            // 直近の HTTP 観測(実際に dispatch されたモデル)を優先し、
-            // HTTP が飛んでいない失敗(課金 precheck 等)では
-            // resolve が記録した実 dispatch モデル(lastResolved)を、
-            // それも無ければ session.model を使う。
+            // Mitigate mis-attribution (v0.8.1): session.model may already have been rewritten
+            // to a healthy model by rescue's switchModel,
+            // and blaming it would wrongly cool down a healthy model.
+            // Prefer the latest HTTP observation (the model actually dispatched);
+            // for failures with no HTTP flight (billing precheck, etc.),
+            // use the actually dispatched model recorded by resolve (lastResolved);
+            // if that is also absent, fall back to session.model.
             const obs = pending.get(sid)
             if (obs) ref = refFor(obs.providerID, obs.modelID)
             if (!ref) {
@@ -1036,7 +1035,7 @@ export default Plugin.define({
           })
           if (!ref) continue
           markFailure(ref, cls)
-          // クオータ系は品質ペナルティにしない(統計の成功率を歪めない)
+          // Quota failures are not penalized in quality (don't skew stats success rate)
           if (cls === "error") {
             const slash = ref.indexOf("/")
             await record(
@@ -1048,8 +1047,8 @@ export default Plugin.define({
               true,
             )
           }
-          // 失敗直後にセッションのモデルを切り替え、次の再開で
-          // 同じ利用不可モデルを選ばないようにする。
+          // Switch the session model immediately after failure so the next resume
+          // does not pick the same unavailable model again.
           if (typeof event.data?.sessionID === "string") {
             const targetRef = ref
             const currentCategory = sessionCategory.get(event.data.sessionID)
@@ -1065,7 +1064,7 @@ export default Plugin.define({
                   sessionID: event.data.sessionID,
                   model: { providerID: choice.providerID, id: choice.id },
                 })
-                // 失敗した元モデルを復帰候補として記録する
+                // Record the originally failed model as a restore candidate
                 if (targetRef !== refFor(choice.providerID, choice.id)) {
                   rescueAttempts.set(event.data.sessionID, {
                     originalRef: targetRef,
@@ -1086,12 +1085,12 @@ export default Plugin.define({
           }
         }
       } catch {
-        // イベント購読の失敗は無視(再読み込み時に発生しうる)
+        // Failure to subscribe to events is ignored (can happen on reload)
       }
     })()
 
     // ------------------------------------------------------------------
-    // ベンチマーク事前(v0.6)の読み込み
+    // Loading benchmark priors (v0.6)
     // ------------------------------------------------------------------
     const defaultBenchmarksPath = (): string => {
       try {
@@ -1129,7 +1128,7 @@ export default Plugin.define({
         return undefined
       }
     }
-    // 下馬評ファイルが90日より古い場合、k を半分にする(陳腐化対策)
+    // If the priors file is older than 90 days, halve k (staleness mitigation)
     const benchmarkPriorK = (benchmarks?: BenchmarkFile): number => {
       const k = cfg.benchmarkPriorWeight
       if (k <= 0) return 0
@@ -1174,14 +1173,14 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
-    // 候補モデル(返却形を正規化して取得)
+    // Candidate models (fetched with normalized shape)
     // ------------------------------------------------------------------
-    // 単一プロバイダー時は cfg.providerID 配下のモデルのみ。
-    // crossProvider 時は: 全プロバイダー(ホワイトリストは完全参照形式)。
-    // expand(緊急時)は: 全プロバイダー・ホワイトリスト無視。
-    //   無料枠はアカウント単位のため、現プロバイダーがクオータ冷却中なら
-    //   そのプロバイダーのモデルは全滅している。rescue は別プロバイダーの
-    //   「観測のある健康なモデル」へ退避する必要があるため。
+    // Single provider: models under cfg.providerID only.
+    // crossProvider: all providers (whitelist uses full-reference form).
+    // expand (emergency): all providers, whitelist ignored.
+    //   Free tier is account-wide, so if the current provider is cooling down on quota
+    //   all of its models are down. Rescue needs to fall back to models on other providers
+    //   that are "observed to be healthy".
     const candidates = async (expand = false) => {
       const raw: any = await ctx.model.list()
       const models: any[] = Array.isArray(raw)
@@ -1212,9 +1211,9 @@ export default Plugin.define({
           m.cost.length > 0 &&
           (!costLimitsApply || costOK(m)) &&
           (expand
-            ? // 緊急拡大(v0.8.1): ホワイトリスト外にも出るが、有料モデルへの
-              // シームレスな退避をユーザーの予算内に留めるため costOK を適用。
-              // 無料モデルは上限と無関係なのでそのまま通す
+            ? // Emergency expansion (v0.8.1): goes beyond the whitelist, but applies costOK
+              // to keep seamless fallback to paid models within the user's budget.
+              // Free models are unaffected by the cap and pass through as-is
               whitelist.size === 0 ||
               whitelist.has(refFor(m.providerID, m.id)) ||
               costOK(m)
@@ -1226,18 +1225,18 @@ export default Plugin.define({
       )
     }
     // ------------------------------------------------------------------
-    // タスク分類(Task Classifier)
+    // Task Classifier
     // ------------------------------------------------------------------
-    // prompt フック(受付時)に軽量モデルで分類し、セッション単位で保持する。
+    // Classify at the prompt hook (admission) with a lightweight model, kept per session.
     const sessionCategory = new Map<string, string>()
-    // セッション単位で「採用したトポロジー」を保持する(http.response での記録用)
+    // Keep the "adopted topology" per session (for recording at http.response)
     const sessionTopology = new Map<string, string>()
-    // セッション単位の負荷帯(v0.8 ティアルーティング)。admission の classify で
-    // 推定し、experimental.model.resolve のティア選択で使う。turn 単位で更新。
+    // Per-session load band (v0.8 tier routing). Estimated at admission classify,
+    // used by the tier selection in experimental.model.resolve. Updated per turn.
     const sessionLoad = new Map<string, TierName>()
 
-    // 負荷帯のヒューリスティック(Jev/LLM が使えないときの最終縮退)。
-    // カテゴリ既定 + 文字数 + multi-step キーワードで 0-100 を概算する。
+    // Load-band heuristic (last-resort fallback when Jev/LLM is unavailable).
+    // Estimate 0-100 from category defaults + text length + multi-step keywords.
     const heuristicLoad = (text: string, category?: string): TierName => {
       let score = 30
       if (category === "coding" || category === "debugging") score += 25
@@ -1285,7 +1284,7 @@ export default Plugin.define({
           assignedAt: new Date().toISOString(),
         })
       } catch {
-        // レビュー用メタデータの保存失敗は通常処理を妨げない
+        // Failure to persist review-assignment metadata does not block normal processing
       }
     }
     const loadReviewAssignment = async (
@@ -1301,11 +1300,11 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
-    // トポロジー観測(v0.7a)
+    // Topology observation (v0.7a)
     // ------------------------------------------------------------------
-    // Jev か実績/ヒューリスティックで「判定した形態」を http.response の
-    // 結果(ok/ms)と紐づけ、fusion/topology/* に蓄積する。
-    // 失敗(quota 以外)も記録する。quota はモデル品質を測らないため除外。
+    // Link "the judged shape" via Jev or track record/heuristics to the http.response
+    // result (ok/ms), and accumulate into fusion/topology/*.
+    // Failures (other than quota) are also recorded. quota is excluded as it does not measure model quality.
     const loadTopologyStat = async (key: string): Promise<TopologyStat | undefined> => {
       const saved = await ctx.storage.get(key)
       if (!saved || typeof saved !== "object") return undefined
@@ -1379,11 +1378,11 @@ export default Plugin.define({
           await writeTopologyStat(task, taskKey)
         }
       } catch {
-        // トポロジー観測の失敗は通常処理を妨げない
+        // Topology observation failure does not block normal processing
       }
     }
-    // 内部審査(autoReview)のスコアをトポロジー統計へ加算する(v0.7a)。
-    // http.response の直後に runAutoReview が完了したタイミングで呼ばれる。
+    // Add the inner review (autoReview) score into the topology stats (v0.7a).
+    // Called right after http.response, when runAutoReview completes.
     const recordTopologyQuality = async (
       sessionID: string,
       quality: number,
@@ -1408,10 +1407,10 @@ export default Plugin.define({
           await writeTopologyStat(task, taskKey)
         }
       } catch {
-        // トポロジー品質の加算失敗は通常処理を妨げない
+        // Adding topology quality failure does not block normal processing
       }
     }
-    // 人間による「トポロジーのコストパフォーマンス」評価(1〜5)を加算する。
+    // Add the human "cost-performance of this topology" rating (1-5).
     const recordTopologyCostPerformance = async (
       sessionID: string,
       rating: number,
@@ -1436,11 +1435,11 @@ export default Plugin.define({
           await writeTopologyStat(task, taskKey)
         }
       } catch {
-        // トポロジーコスパの加算失敗は通常処理を妨げない
+        // Adding topology cost-performance failure does not block normal processing
       }
     }
-    // Jev Choice の確率分布をトポロジー事前として記録する(D-4 の w1)。
-    // 判定1回あたり確率1を各形態に分配し、平均事前確率を選定スコアに使う。
+    // Record the Jev Choice probability distribution as the topology prior (the w1 of D-4).
+    // Each judgment distributes probability 1 across the shapes; the average prior probability feeds the selection score.
     const recordTopologyPrior = async (
       category: string | undefined,
       probabilities: Record<string, number> | undefined,
@@ -1473,11 +1472,11 @@ export default Plugin.define({
           }
         }
       } catch {
-        // 事前記録の失敗は通常処理を妨げない
+        // Recording prior failure does not block normal processing
       }
     }
-    // 補助呼び出し(planner など)の所要時間をトポロジー統計へ加算する。
-    // 主応答の totalMs と区別するため auxCalls/auxMs に分けて記録する。
+    // Add the duration of auxiliary calls (planner, etc.) to the topology stats.
+    // Kept in auxCalls/auxMs to distinguish from the main response's totalMs.
     const recordTopologyAux = async (sessionID: string, ms: number) => {
       try {
         const topology = sessionTopology.get(sessionID) ?? "single"
@@ -1499,12 +1498,12 @@ export default Plugin.define({
           await writeTopologyStat(task, taskKey)
         }
       } catch {
-        // 補助呼び出し計測の失敗は通常処理を妨げない
+        // Auxiliary-call measurement failure does not block normal processing
       }
     }
-    // トポロジー選定スコア(D-4 加重合成)。
-    //   score = w1 × Jev事前確率 + w2 × 人間コスパ + w3 × 自動観測
-    // 各信号が無い軸は中立 0.5。Jev キー無し時は w1=0 扱いで正規化する。
+    // Topology selection score (D-4 weighted combination).
+    //   score = w1 x Jev prior probability + w2 x human cost-performance + w3 x automatic observation
+    // Axes without a signal use the neutral 0.5. Without a Jev key, w1=0 with normalization.
     const topologyScore = (stat: TopologyStat, useJevPrior: boolean): number => {
       const wJev = useJevPrior ? cfg.topologyWeightJev : 0
       const wCP = cfg.topologyWeightHumanCP
@@ -1519,7 +1518,7 @@ export default Plugin.define({
         stat.costPerformanceCount > 0
           ? stat.sumCostPerformance / stat.costPerformanceCount / 5
           : 0.5
-      // 自動観測: 内部審査の品質平均を主に、無ければ ok 率で代用
+      // Automatic observation: primarily the inner-review quality average, falling back to the ok rate
       const auto =
         stat.qualityCount > 0
           ? stat.sumQuality / stat.qualityCount / 5
@@ -1528,8 +1527,8 @@ export default Plugin.define({
             : 0.5
       return (wJev * prior + wCP * cp + wAuto * auto) / total
     }
-    // カテゴリ別トポロジー実績の要約(Jev の state に渡す)。
-    // 例: "coding: single 12件 (ok 83%, quality 4.1), router 5件 (ok 60%, quality 3.2)"
+    // Summary of per-category topology track record (passed to Jev's state).
+    // Example: "coding: single 12x (ok 83%, quality 4.1), router 5x (ok 60%, quality 3.2)"
     const topologyStatsSummary = async (
       category: string | undefined,
     ): Promise<string> => {
@@ -1551,10 +1550,10 @@ export default Plugin.define({
       return parts.length > 0 ? parts.join(", ") : "(no prior stats for this category)"
     }
 
-    // 実績ベースのヒューリスティック(Jev 不可時)。
-    // カテゴリ別トポロジー実績が3件以上あるものから最高評価を選ぶ。
-    // 実績なし/評価不能 → single(従来動作)。
-    // "評価"は内部審査スコア平均。quality が1件も無い場合は ok 率で代用する。
+    // Track-record-based heuristic (when Jev is unavailable).
+    // Pick the best-rated among per-category shape records with 3+ entries.
+    // No records / not rateable -> single (legacy behavior).
+    // "Rating" is the inner-review score average. If no quality samples exist, the ok rate is used.
     const heuristicTopology = async (
       category: string | undefined,
       useJevPrior = false,
@@ -1568,35 +1567,35 @@ export default Plugin.define({
         const stat = await loadTopologyStat(key)
         if (!stat || stat.count < 3) continue
         anyQualified = true
-        // D-4 加重合成: w1 × Jev事前 + w2 × 人間コスパ + w3 × 自動観測
+        // D-4 weighted combination: w1 x Jev prior + w2 x human cost-performance + w3 x automatic observation
         const score = topologyScore(stat, useJevPrior)
         if (!best || score > best.score) {
           best = { topology, score }
         }
       }
       if (!anyQualified || !best) return "single"
-      // sequential-chain は planner 1呼出が前提(verifier は autoReview と共有)
+      // sequential-chain assumes 1 planner call (verifier is shared with autoReview)
       if (best.topology === "sequential-chain" && cfg.maxTopologyCalls < 2)
         return "single"
       return best.topology
     }
-    // Jev の Choice 回答から採用するトポロジーを決める。
-    // confidence < 0.7 なら最も保守的な single へ縮退(README §4 の方針)。
+    // Decide the adopted topology from Jev's Choice answer.
+    // If confidence < 0.7, fall back to the most conservative single (README §4 policy).
     const resolveTopology = (choice: string | undefined): string => {
       if (cfg.topologyMode === "fixed") return "single"
       if (!choice) return "single"
       if (!cfg.allowedTopologies.includes(choice)) return "single"
-      // sequential-chain は planner 1呼出が前提(verifier は autoReview と共有)。
-      // コストガードで足りない場合は縮退
+      // sequential-chain assumes 1 planner call (verifier is shared with autoReview).
+      // Fall back if the cost guard is insufficient
       if (choice === "sequential-chain" && cfg.maxTopologyCalls < 2)
         return "single"
       return choice
     }
-    // トポロジー判定(pickTopology)。カテゴリ確定後に呼ばれる。
-    //   Jev 利用可: Choice(allowedTopologies のみ)。
-    //     state = { instruction, category, categoryTopologyStats(過去実績の要約) }
-    //     confidence < 0.7 → single へ縮退
-    //   Jev 不可: ヒューリスティック(カテゴリ実績 ≥3件 → 最高評価 / それ以外 single)
+    // Topology selection (pickTopology). Called after the category is settled.
+    //   With Jev: Choice (allowedTopologies only).
+    //     state = { instruction, category, categoryTopologyStats (summary of past records) }
+    //     confidence < 0.7 -> fall back to single
+    //   Without Jev: heuristic (category record with >=3 entries -> best rated / otherwise single)
     const pickTopology = async (
       text: string,
       category: string | undefined,
@@ -1626,7 +1625,7 @@ export default Plugin.define({
       )
       const answer = answers?.topology
       if (answer?.type === "choice") {
-        // 確率分布をトポロジー事前として記録(D-4 の w1 合成に使う)
+        // Record the probability distribution as the topology prior (used for the w1 combination of D-4)
         await recordTopologyPrior(category, answer.probabilities)
         if (answer.confidence >= 0.7) {
           logRoute(
@@ -1639,22 +1638,22 @@ export default Plugin.define({
         )
         return "single"
       }
-      // Jev 失敗時はヒューリスティックへ(縮退運転)。
-      // キー自体は有効なので、過去に記録した Jev 事前があれば w1 を使う。
+      // On Jev failure, fall back to the heuristic (degraded operation).
+      // The key itself is valid, so if a past Jev prior exists, w1 is used.
       logRoute("TOPOLOGY jev unavailable -> heuristic")
       return heuristicTopology(category, true)
     }
 
     // ------------------------------------------------------------------
-    // 人間フィードバック(手動レビュー)
+    // Human feedback (manual review)
     // ------------------------------------------------------------------
-    // 応答パネルで1〜5の満足度を受け付け、オーケストレーションの
-    // 選択機構へ還元する。HTTP成功率だけでは測れない品質差を補う。
+    // Accept 1-5 satisfaction on the response panel and feed it back into
+    // the orchestration selection mechanism. Covers quality gaps that HTTP success rate alone cannot measure.
     const feedbackScore = (feedback: Record<string, unknown> | undefined) => {
       const n = num(feedback?.count, 0)
       const raw = num(feedback?.ratingSum, 0)
-      if (n <= 0) return 0.5 // 評価なしは中立
-      // 1..5 を 0..4 に正規化して、ベータ分布的な平滑化(2件の疑似観測)
+      if (n <= 0) return 0.5 // no evaluation = neutral
+      // Normalize 1..5 to 0..4 and smooth beta-distribution-style (2 pseudo-observations)
       const normalizedSum = (raw - n) / 4
       return (normalizedSum + 1) / (n + 2)
     }
@@ -1706,10 +1705,10 @@ export default Plugin.define({
       instructionPreview: string
       text: string
       preview: string
-      // v0.9.0: 対象ターン(0=最新, 1=1個前, …)。複数個前の応答も審査できる。
+      // v0.9.0: target turn (0 = latest, 1 = one before, ...). Earlier responses can also be reviewed.
       offset: number
-      // v0.9.0: ターン統計(tokens/cost/time はメッセージに永続記録されるため
-      // 過去ターンも後付け計算できる)。記録が無いターン(エラー応答等)は省略。
+      // v0.9.0: turn stats (tokens/cost/time are persisted on the message, so
+      // past turns can be computed after the fact). Turns with no record (e.g. error responses) are omitted.
       turn?: {
         inputTokens: number
         outputTokens: number
@@ -1750,8 +1749,8 @@ export default Plugin.define({
           (a: any, b: any) =>
             num(b?.time?.created, 0) - num(a?.time?.created, 0),
         )
-      // v0.9.0: offset 番目の「本文あり」応答を対象にする(0=最新, 1=1個前, …)。
-      // offset=0 のみ従来動作(本文なしの最新にもフォールバック)を維持する。
+      // v0.9.0: target the "response with a body" at position offset (0 = latest, 1 = one before, ...).
+      // Only offset=0 keeps the legacy behavior (also falls back to the latest body-less message).
       const withText = assistants.filter((message) => messageText(message).length > 0)
       const assistant = withText[offset] ?? (offset === 0 ? assistants[0] : undefined)
       if (!assistant) return undefined
@@ -1778,9 +1777,9 @@ export default Plugin.define({
         .find((text) => text.length > 0) ?? ""
       const text = messageText(assistant)
       const assignment = await loadReviewAssignment(sessionID)
-      // v0.9.0: ターン統計。メッセージに tokens/cost/time が記録されている
-      // 場合のみ含める(エラー応答などは省略)。tps = 出力トークン ÷
-      // (completed - firstToken) 実測ストリーム時間。
+      // v0.9.0: turn stats. Only included when tokens/cost/time are recorded on the message
+      // (omitted for error responses, etc.). tps = output tokens ÷
+      // (completed - firstToken), the actual streamed duration.
       const tokens = (assistant as any)?.tokens
       const time = (assistant as any)?.time
       const inputTokens = typeof tokens?.input === "number" ? tokens.input : 0
@@ -1847,10 +1846,10 @@ export default Plugin.define({
       }
     }
 
-    // 補助LLM(分類・サマリー・審査): 設定モデルを優先し、観測が良好で
-    // クオータ冷却中ではない候補へ自動でフォールバックする。
-    // preferred を渡すと、そのモデルを最前位として試みる
-    // (内部審査で専用モデルを使い、本応答モデルとの同一性バイアスを避ける)。
+    // Auxiliary LLM (classification / summary / review): prefer the configured model,
+    // automatically falling back to candidates with good observations that are not in quota cooldown.
+    // If preferred is given, that model is tried first
+    // (use a dedicated model for inner review to avoid same-identity bias with the main response model).
     const auxiliaryCandidates = async (
       preferred?: { providerID: string; id: string },
     ) => {
@@ -1984,8 +1983,8 @@ export default Plugin.define({
       return lines.length === 3 ? lines.join("\n") : fallback()
     }
 
-    // LLMが利用できない場合のローカル分類も用意する(未分類の多発を抑える)。
-    // 明確な語彙シグナルがない場合は推測せず「未分類」のままにする。
+    // Also provide a local classifier when the LLM is unavailable (to avoid unclassified requests piling up).
+    // Without clear lexical signals, do not guess — leave it "unclassified".
     const keywordCategory = (text: string): string | undefined => {
       const lower = text.toLowerCase()
       const patterns: [string, RegExp[]][] = [
@@ -2005,7 +2004,7 @@ export default Plugin.define({
       return best && best.score > 0 ? best.category : undefined
     }
 
-    // Jev の Choice へ渡すカテゴリの対比定義
+    // Contrastive definitions of categories passed to Jev's Choice
     const CATEGORY_CRITERIA: Record<string, string> = {
       coding: "write, modify, or create code/files",
       debugging: "fix errors, bugs, or failing tests",
@@ -2016,16 +2015,16 @@ export default Plugin.define({
     }
     const classify = async (sessionID: string, text: string): Promise<void> => {
       let category: string | undefined
-      // 新しい turn: 前 turn の計画を破棄(chain 実行の枠組みを turn 単位に保つ)
+      // New turn: discard the previous turn's plan (keep the chain execution framework per turn)
       chainPlans.delete(sessionID)
-      // 新しい turn: 前 turn の負荷帯も破棄(v0.8 ティアルーティング。
-      // LLM/ヒューリスティック経路の「未設定なら設定」判定を正しく働かせる)
+      // New turn: also discard the previous turn's load band (v0.8 tier routing.
+      // Lets the "set if unset" decision in the LLM/heuristic paths work correctly)
       sessionLoad.delete(sessionID)
 
-      // --- Jev 経路(APIキーがあり jevMode=auto のとき最優先) ---
-      // カテゴリ分類を Choice で判定する(confidence < 0.5 → 従来経路へ縮退)。
-      // トポロジー判定はカテゴリ確定後に pickTopology() で別リクエスト実行
-      // (state に category と過去実績の要約を渡せるため)。
+      // --- Jev path (highest priority when an API key exists and jevMode=auto) ---
+      // Classify the category with Choice (confidence < 0.5 -> fall back to the legacy path).
+      // Topology selection runs in a separate request via pickTopology() after the category is settled
+      // (so the state can carry the category and the summary of past records).
       const jev = jevClient()
       if (jev) {
         const answers = await jev.ask(text.slice(0, 1000), {
@@ -2035,8 +2034,8 @@ export default Plugin.define({
               "Classify the user request into exactly one task category.",
             criteria: CATEGORY_CRITERIA,
           },
-          // ティアルーティング(v0.8): 分類と同じ1往復で負荷も判定する
-          // (追加の API 呼び出しを発生させない)。0-100 の difficulty。
+          // Tier routing (v0.8): also judge the load in the same round trip as classification
+          // (no extra API call). difficulty is 0-100.
           difficulty: {
             type: "score",
             instructions:
@@ -2050,8 +2049,8 @@ export default Plugin.define({
           },
         })
         const catAnswer = answers?.category
-        // 負荷推定は分類と独立に採用できる(Jev score の信頼度は選ばない。
-        // スコア自体は 0-100 の連続値で、ヒューリスティックより常に精度が上と仮定)
+        // Load estimation is adopted independently of classification (Jev score trustworthiness is not the selector.
+        // The score itself is a continuous 0-100 value, assumed always more accurate than the heuristic)
         const diffAnswer = answers?.difficulty
         if (diffAnswer?.type === "score" && typeof diffAnswer.score === "number") {
           setSessionLoad(
@@ -2077,7 +2076,7 @@ export default Plugin.define({
         }
       }
 
-      // --- 従来経路(LLM → キーワード推定)。Jev 成功時はスキップ ---
+      // --- Legacy path (LLM -> keyword estimation). Skipped when Jev succeeds ---
       if (!category) {
         const prompt = [
           "Classify the following user request into exactly one category.",
@@ -2098,7 +2097,7 @@ export default Plugin.define({
           llmCategory && categories.includes(llmCategory)
             ? llmCategory
             : keywordCategory(text)
-        // LLM 経路でも負荷を取れる。difficulty 無し/範囲外はヒューリスティックへ
+        // The LLM path can also produce the load. difficulty absent/out of range -> heuristic
         const diffMatch = /"difficulty"\s*:\s*([0-9.]+)/i.exec(
           result?.text ?? "",
         )
@@ -2116,8 +2115,8 @@ export default Plugin.define({
         }
       }
 
-      // 最終縮退: Jev/LLM どちらも負荷を出せなかった場合はヒューリスティック。
-      // tierMode=off でも推定自体は記録しておく(表示と後日の統計に使う)
+      // Final fallback: heuristic when neither Jev nor the LLM produced a load.
+      // Even with tierMode=off, the estimate itself is recorded (for display and later stats)
       if (!sessionLoad.has(sessionID)) {
         setSessionLoad(
           sessionID,
@@ -2129,7 +2128,7 @@ export default Plugin.define({
       if (category && categories.includes(category)) {
         sessionCategory.set(sessionID, category)
         void saveReviewAssignment(sessionID, category)
-        // 無限成長を避けるための簡易上限
+        // Simple cap to avoid unbounded growth
         if (sessionCategory.size > 200) {
           const oldest = sessionCategory.keys().next().value
           if (oldest) sessionCategory.delete(oldest)
@@ -2169,12 +2168,12 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
-    // プロンプト受信時の事前rescue
+    // Admission handling: pre-rescue
     // ------------------------------------------------------------------
-    // モデルが冷却中(直近「利用不可」)なら、resolve フックの差し替えだけに
-    // 任せず、セッション自身のモデルを健康な候補へ切り替える。
-    // これにより provider activation も済み、resolve 差し替えが
-    // ModelUnavailableError になるケースを避ける。
+    // If the model is cooling down (recently "unavailable"), do not only swap via the resolve hook;
+    // instead, directly switch the session's own model to a healthy candidate.
+    // This also activates the provider and avoids the case where a resolve swap
+    // becomes ModelUnavailableError.
     const switchSessionIfCooling = async (
       sessionID: string,
       category?: string,
@@ -2187,9 +2186,9 @@ export default Plugin.define({
             ? refFor(model.providerID, model.id)
             : undefined
         if (!model?.providerID || !model?.id) {
-          // 未切替セッション(新規セッションのデフォルトモデル等)は
-          // session.model が未設定。resolve が記録した実 dispatch モデル
-          // (lastResolved)で代替する(v0.8.1)。無いなら救済不能。
+          // Unswitched sessions (e.g. new session default model)
+          // have no session.model set. Fall back to the actually dispatched model
+          // recorded by resolve (lastResolved) (v0.8.1). If that is also missing, no recovery is possible.
           const hint = lastResolved.get(sessionID)
           if (hint?.providerID && hint?.id) {
             logRoute(`PRE hint ${hint.providerID}/${hint.id} (session model unset)`)
@@ -2197,9 +2196,9 @@ export default Plugin.define({
             currentRef = refFor(model.providerID, model.id)
           }
         }
-        // rescue復帰: このセッションがrescueで他モデルへ移された
-        // 後で、元モデルの冷却が解除された場合、次のプロンプトで
-        // 自動的に元のモデルへ戻す
+        // rescue restore: when this session was moved to another model via rescue
+        // and that model's cooldown has since lifted, automatically
+        // switch back to the original model on the next prompt
         if (currentRef) {
           const restored = maybeRestoreFromRescue(sessionID)
           if (restored && restored.ref !== currentRef) {
@@ -2222,8 +2221,8 @@ export default Plugin.define({
           return
         }
         if (!cool(currentRef!)) {
-          // 現在のモデルが健全でも、rescue復帰の待機エントリーは
-          // 失効(24h)まで残す(元モデルの回復を検知するため)
+          // Even if the current model is healthy, the rescue-restore pending entry
+          // is kept until it expires (24h) (to detect recovery of the original model)
           logRoute(`PRE alive ${currentRef} (no rescue needed)`)
           return
         }
@@ -2249,25 +2248,24 @@ export default Plugin.define({
       }
     }
 
-    // admission(受付時)の処理を1つのフックに統合(v0.8 監査修正):
-    // 1) 分類(カテゴリ/トポロジー/負荷帯)→ 2) 事前rescue。
-    // 分けるとフック間の実行順序がランタイムの実装に依存し、rescue が
-    // 前ターンのカテゴリ・負荷帯を使う恐れがあるため、順序を明示する。
+    // Consolidate admission-time handling into a single hook (v0.8 audit fix):
+    // 1) classify (category/topology/load band) -> 2) pre-rescue.
+    // Splitting them makes execution order across hooks depend on the runtime implementation,
+    // so rescue might use the previous turn's category/load band — hence the explicit order.
     await ctx.session.hook("prompt", async (event) => {
-      // TUI トグル恒久対策(v0.8.1): TUI 側プラグインインスタンスが
-      // 永続化した設定変更を、ターン開始(必ず通る)時にサーバー側へ
-      // 再読込して反映する。storage が両インスタンスで共有されている
-      // 場合のみ実効的(非共有なら changed=false で実害なし)。
+      // TUI toggle durable fix (v0.8.1): reload the settings persisted by the TUI-side plugin
+      // instance into the server side at the start of a turn (which always runs). Only effective
+      // if storage is shared between both instances (if not shared, changed=false, no harm).
       try {
         if (applyPersistedConfig(await ctx.storage.get(CONFIG_KEY)))
           logRoute(`CONFIG synced from storage (enabled=${cfg.enabled})`)
       } catch {
-        // 再同期の失敗は通常処理を妨げない
+        // Resync failure does not block normal processing
       }
       try {
         await classify(event.sessionID, event.prompt.text)
       } catch (error) {
-        // 分類の失敗は通常処理を妨げない(未分類のまま続行)
+        // Classification failure does not block normal processing (continue unclassified)
         logRoute(`CLASSIFY error: ${String(error).slice(0, 80)}`)
       }
       try {
@@ -2276,18 +2274,18 @@ export default Plugin.define({
           sessionCategory.get(event.sessionID) ?? undefined,
         )
       } catch {
-        // 事前rescueの失敗は通常処理を妨げない(内部でもcatch済みの二重保険)
+        // Pre-rescue failure does not block normal processing (double safety net; also caught internally)
       }
     })
 
     // ------------------------------------------------------------------
-    // sequential-chain 補助実行(v0.7a 完全版、P0 プローブ済みの context フック)
+    // Auxiliary execution of sequential-chain (full v0.7a, context hook verified with P0 probes)
     // ------------------------------------------------------------------
-    // admission で chain が選ばれた turn だけ chainPending に積み、主モデルの
-    // dispatch 直前に planner を実行して計画を system へ「参考」として注入する。
-    // 注入は送出する1呼出にのみ影響し、履歴・設定は汚さない(公式仕様)。
-    // tool 継続の dispatch でも同一 turn の計画を再注入して使い続ける。
-    // 失敗・タイムアウト時は注入せず single 相当で続行(縮退運転)。
+    // Only turns where chain was selected at admission get pushed into chainPending; the planner
+    // runs just before the main model dispatch, and the plan is injected into the system prompt as "reference".
+    // Injection affects only the single outgoing call; it does not touch history/settings (per the official spec).
+    // For tool-continuation dispatches, the same turn's plan is re-injected and reused.
+    // On failure/timeout, no injection happens and it continues as single (degraded operation).
     const PLANNER_TIMEOUT_MS = 8_000
     const chainPending = new Map<string, { category?: string; text: string }>()
     const chainPlans = new Map<string, { plan: string; at: number }>()
@@ -2366,9 +2364,9 @@ export default Plugin.define({
           )
           return
         }
-        // 同一 turn 内の tool 継続 dispatch: 計画を再注入して使い続ける。
-        // chainPlans は admission(prompt フック)の classify で turn ごとに
-        // クリアされるため、古い計画が次の turn へ漏れることはない。
+        // Tool-continuation dispatch within the same turn: re-inject the plan and keep using it.
+        // chainPlans is cleared per turn by classify at admission (prompt hook),
+        // so an old plan never leaks into the next turn.
         const existing = chainPlans.get(sessionID)
         if (existing && Array.isArray(event?.system)) {
           event.system.push({
@@ -2377,23 +2375,23 @@ export default Plugin.define({
           })
         }
       } catch (error) {
-        // context フックの失敗は主応答を妨げない(P0 で例外耐性を確認済み)
+        // context hook failure does not block the main response (exception tolerance verified in P0)
         logRoute(`CHAIN context error: ${String(error).slice(0, 80)}`)
       }
     })
 
     // ------------------------------------------------------------------
-    // メトリクス収集(http.request / http.response の区間を計測)
+    // Metrics collection (measuring the http.request / http.response interval)
     // ------------------------------------------------------------------
-    // キーは sessionID。セッションあたり同一種別のリクエストは逐次実行される前提。
-    // プロバイダー非依存に対応するため、フックは非スコープ登録し、
-    // コールバック内で cfg.providerID を参照する。
+    // Keyed by sessionID. Per session, the same kind of requests are expected to run sequentially.
+    // To stay provider-agnostic, hooks are registered unscoped,
+    // and the callback reads cfg.providerID.
     // ------------------------------------------------------------------
-    // 内部レビューハーネス(v0.6) — shadow mode
+    // Internal review harness (v0.6) — shadow mode
     // ------------------------------------------------------------------
-    // http.response(ok=true) の直後に、依頼文+応答本文を別モデルで審査し、
-    // fusion/auto/* に蓄積する。ユーザーへの応答はブロックしない。
-    // 現時点ではスコアへ反映しない(記録のみ・表示のみ)。
+    // Right after http.response(ok=true), review the instruction + response body with a separate model
+    // and accumulate into fusion/auto/*. Does not block the user-facing response.
+    // Scores are not applied yet at this stage (record-only / display-only).
     const clampScore = (v: unknown): number | undefined => {
       const n = Number(v)
       if (!Number.isFinite(n)) return undefined
@@ -2404,9 +2402,9 @@ export default Plugin.define({
       try {
         const target = await getReviewTarget(sessionID)
         if (!target) return
-        if (target.text.length < 120) return // 短すぎる応答は審査しない
-        // v0.9.0: コストパフォーマンス軸(efficiency)に渡すターン統計。
-        // tokens/cost/time はメッセージに永続記録されているので参照できる。
+        if (target.text.length < 120) return // shorter responses are not reviewed
+        // v0.9.0: turn stats passed to the cost-performance axis (efficiency).
+        // tokens/cost/time are persisted on the message, so they can be referenced.
         const t = target.turn
         const statsLine = t
           ? [
@@ -2464,17 +2462,17 @@ export default Plugin.define({
           await recordAutoSkip("no reviewer available", "(none)")
           return
         }
-        // 審査出力のパース。JSON → ラベル付き行 → 独立整数、の3段フォールバック。
+        // Parse the review output. JSON -> labeled lines -> independent integers, 3-stage fallback.
         const parseAxis = (re: RegExp): number | undefined => {
           const m = re.exec(result.text)
           if (!m) return undefined
           const n = Number(m[1])
           return Number.isInteger(n) && n >= 1 && n <= 5 ? n : undefined
         }
-        // v0.9.0: 穴あきでない JSON 部分の抽出。results 配列を含む新形式の
-        // JSON(複数行・文字列内の記号)でも取りこぼさないよう、
-        // "instruction" の位置から前方の "{" を探し、括弧カウンタで対応する
-        // "}" まで取る。旧形式(3軸のみ)にもそのまま使える。
+        // v0.9.0: extract the non-empty JSON portion. To avoid dropping new-format JSON
+        // (multi-line, symbols inside strings, containing a results array),
+        // find the "{" before the position of "instruction" and track parentheses with a counter
+        // through the matching "}". Also works unchanged for the old format (3 axes only).
         const extractJson = (text: string): string | undefined => {
           const keyAt = text.indexOf('"instruction"')
           if (keyAt < 0) return undefined
@@ -2522,8 +2520,8 @@ export default Plugin.define({
             instruction = clampScore(parsed.instruction)
             accuracy = clampScore(parsed.accuracy)
             completeness = clampScore(parsed.completeness)
-            // v0.9.0: efficiency は任意軸(旧レビューモデルの出力では欠ける)。
-            // 欠けても審査自体は有効とする(後方互換)。
+            // v0.9.0: efficiency is an optional axis (absent in old reviewer model output).
+            // The review itself is still valid when it is missing (backward compatible).
             efficiency = clampScore(parsed.efficiency)
             const rawResults = parsed.results
             if (Array.isArray(rawResults))
@@ -2533,17 +2531,17 @@ export default Plugin.define({
                 .slice(0, 5)
             reasonText = String(parsed.reason ?? "")
           } else {
-            // 行パース(A-2): JSON が取れない場合はラベル+数値 / 日本語ラベルを探す
+            // Line parsing (A-2): when no JSON is available, look for label + number / Japanese labels
             instruction = parseAxis(/instruction[^\d]{0,40}([1-5])/i) ??
               parseAxis(/指示[^\d]{0,40}([1-5])/)
             accuracy = parseAxis(/accuracy[^\d]{0,40}([1-5])/i) ??
               parseAxis(/正確[^\d]{0,40}([1-5])/)
             completeness = parseAxis(/completeness[^\d]{0,40}([1-5])/i) ??
               parseAxis(/完了|完遂[^\d]{0,40}([1-5])/)
-            // v0.9.0: efficiency も行パースで拾う(欠けても継続)
+            // v0.9.0: also pick up efficiency via line parsing (continue even if missing)
             efficiency = parseAxis(/efficiency[^\d]{0,40}([1-5])/i) ??
               parseAxis(/効率|コスパ[^\d]{0,40}([1-5])/)
-            // それでも欠けていれば、文中の独立した1〜5整数を軸順に割り当てる
+            // If still missing, assign the standalone 1-5 integers in the text to axes in order
             if (
               instruction === undefined ||
               accuracy === undefined ||
@@ -2598,13 +2596,13 @@ export default Plugin.define({
           stat.instruction += instruction
           stat.accuracy += accuracy
           stat.completeness += completeness
-          // v0.9.0: efficiency は出力された審査のみ加算(収集件数も別管理)。
-          // 旧データ(efficiencyCount 未定義)は 0 扱いで後方互換。
+          // v0.9.0: efficiency is added only for reviews that output it (count is tracked separately).
+          // Old data (efficiencyCount undefined) is treated as 0 for backward compatibility.
           if (efficiency !== undefined) {
             stat.efficiency = (stat.efficiency ?? 0) + efficiency
             stat.efficiencyCount = (stat.efficiencyCount ?? 0) + 1
           }
-          // v0.9.0: 実績列挙は直近の審査分で置き換える(最大5件)
+          // v0.9.0: the results enumeration replaces with the latest review (max 5 entries)
           if (results.length > 0) stat.results = results
           stat.reviewerRef = result.model
           stat.reasons.push(
@@ -2627,7 +2625,7 @@ export default Plugin.define({
           )) as AutoReviewStat | undefined
           await saveTaskAutoReview(await persist(taskExisting))
         }
-        // トポロジー統計にも品質スコアを加算する(v0.7a、5点満点→3軸平均)
+        // Also add the quality score to the topology stats (v0.7a, 5-axis -> 3-axis average)
         await recordTopologyQuality(
           sessionID,
           (instruction + accuracy + completeness) / 3,
@@ -2645,12 +2643,12 @@ export default Plugin.define({
       string,
       { start: number; modelID: string; providerID: string }
     >()
-    // 実際に dispatch されたモデルの記録(v0.8.1)。
-    // - 未切替セッションは session.model が未設定のため、事前rescueや
-    //   step.failed の犯人特定に使える観測が pending(HTTP 実施時のみ)に
-    //   しかない。resolve フックは dispatch ごとに必ず来るので、ここで
-    //   「このセッションで最後に解決されたモデル」を覚えておく。
-    // - HTTP が飛ばない失敗(課金 precheck 等)でもこの値が犯人になる。
+    // Recording the actually dispatched model (v0.8.1).
+    // - Unswitched sessions have no session.model, so the observation usable for pre-rescue
+    //   and for identifying the culprit of step.failed exists only in pending (HTTP executed only).
+    //   The resolve hook always fires per dispatch, so remember
+    //   "the model last resolved for this session" here.
+    // - This value also identifies the culprit when no HTTP flight happens (billing precheck, etc.).
     const lastResolved = new Map<
       string,
       { providerID: string; id: string }
@@ -2661,12 +2659,12 @@ export default Plugin.define({
       category: string | undefined,
       ok: boolean,
       ms: number,
-      // force はプローブなど明示的な観測との互換用(現在は常に記録)
+      // force is for compatibility with explicit observations like probes (currently always recorded)
       _force = false,
     ) => {
-      // 観測は全プロバイダー分を記録する:
-      // rescue 先や crossProvider 候補の健全性把握に必要なため。
-      // (統計表示はプロバイダー単位にグループ化される)
+      // Observations are recorded for all providers:
+      // needed to grasp the health of rescue targets and crossProvider candidates.
+      // (Stats display is grouped per provider)
       const write = async (stat: Stat, task?: boolean) => {
         if (ok) stat.success += 1
         else stat.failure += 1
@@ -2699,8 +2697,8 @@ export default Plugin.define({
 
     await ctx.session.hook("http.request", (event) => {
       if (!kinds.includes(event.kind)) return
-      // 対象プロバイダー以外も記録対象(rescue 先の健全性把握のため)。
-      // crossProvider 判定は resolve フック側で行う。
+      // Record providers other than the target too (for assessing rescue-target health).
+      // crossProvider decisions happen in the resolve hook.
       pending.set(event.sessionID, {
         start: performance.now(),
         modelID: event.model.id,
@@ -2720,20 +2718,20 @@ export default Plugin.define({
       const category = sessionCategory.get(event.sessionID)
 
       if (ok) {
-        // 成功した観測はクールダウンを解除する(一時的な利用不可からの復帰)。
-        // 解除が実際に発生した場合のみログに出す(v0.8.1: 無記録だと
-        // 「冷却が消えた理由不明」になって調査できない)。
+        // Successful observations lift the cooldown (recovery from temporary unavailability).
+        // Log only when a lift actually happened (v0.8.1: unrecorded would make
+        // "why did the cooldown disappear" impossible to investigate).
         if (clearCooldown(ref))
           logRoute(`RECOVER ok ${ref} (success observation)`)
         await record(observed.modelID, observed.providerID, category, true, ms)
         void recordTopology(event.sessionID, true, ms)
-        // 内部審査(shadow): 主応答をブロックせずバックグラウンドで審査
+        // Inner review (shadow): review in the background without blocking the main response
         void runAutoReview(event.sessionID)
         return
       }
 
-      // 失敗時: 無料枠・レート制限(quota)は品質ペナルティから除外し、
-      // 長期クールダウンのみを課す(統計の成功率を歪めない)
+      // On failure: free tier / rate limit (quota) is excluded from the quality penalty,
+      // and only a long cooldown is applied (do not skew stats success rate)
       const resp: any = event.response
       let respText = ""
       try {
@@ -2748,9 +2746,9 @@ export default Plugin.define({
       })
       if (cls === "quota") {
         markFailure(ref, "quota")
-        // 失敗直後にセッションモデルを健康な候補へ退避する(v0.8.1)。
-        // OpenCode 側の retry / 次の step / drain 再開が
-        // 保存された健康モデルを使えるようにするため。
+        // Immediately after a failure, fall back the session model to a healthy candidate (v0.8.1).
+        // So OpenCode's retry / the next step / drain resume
+        // can use the saved healthy model.
         void switchSessionIfCooling(event.sessionID, category)
         return
       }
@@ -2759,15 +2757,15 @@ export default Plugin.define({
       void switchSessionIfCooling(event.sessionID, category)
     })
     // ------------------------------------------------------------------
-    // ティアルーティング(v0.8、Copilot Fusion / HydraFusion 方式)
+    // Tier routing (v0.8, Copilot Fusion / HydraFusion style)
     // ------------------------------------------------------------------
-    // タスク負荷(Light/Middle/Heavy)に応じて候補プールをティア内に絞る。
-    // 層内では既存の statScore+探索がそのまま働き、ティアは「プール」を
-    // 定義するだけ(ホワイトリストの強化版)。枯渇時は上方カスケード
-    // (Light→Middle→Heavy)、全ティア枯渇時は従来の全候補選択に縮退する。
-    // auto モード: ベンチマーク overall の降順で候補を3分割する。
-    // コスト上限/ホワイトリストの適用は pick 側の candidates() が担うため、
-    // ここでは純粋にティア集合だけを返す。
+    // Narrow the candidate pool into a tier based on task load (Light/Middle/Heavy).
+    // Within a tier, the existing statScore+exploration works untouched; the tier just
+    // defines "the pool" (an enhanced whitelist). On exhaustion, cascade upward
+    // (Light -> Middle -> Heavy); if all tiers are exhausted, degrade to the legacy all-candidate selection.
+    // auto mode: trisect the candidates by benchmark overall, descending.
+    // Cost caps / whitelist enforcement is handled by pick's candidates(), so
+    // this returns only the pure tier set.
     const normRef = (ref: string) => ref.replace(/:free$/, "")
 
     const autoTiers = (): Record<TierName, string[]> | undefined => {
@@ -2779,7 +2777,7 @@ export default Plugin.define({
         if (typeof entry?.overall === "number")
           entries.push({ ref, score: entry.overall })
       }
-      // 3分割できる最低数を満たさない場合は auto 導出不可(undefined)
+      // Auto derivation not possible when the minimum for trisection is not met (undefined)
       if (entries.length < 3) return undefined
       entries.sort((a, b) => b.score - a.score)
       const third = Math.ceil(entries.length / 3)
@@ -2790,15 +2788,15 @@ export default Plugin.define({
       }
     }
 
-    // 現在の tierMode で有効なティア集合。解決できない場合(off 相当)は undefined
+    // The currently effective tier set for tierMode. undefined when unresolvable (equivalent to off)
     const resolveTiers = (): Record<TierName, string[]> | undefined => {
       if (cfg.tierMode === "manual") return cfg.tiers
       if (cfg.tierMode === "auto") return autoTiers()
       return undefined
     }
 
-    // 負荷帯に対するカスケード順(上方のみ: Light→Middle→Heavy)。
-    // 下位への降格は行わない(キャッシュ効果と応答品質の予測可能性を優先)。
+    // Cascade order for the load band (upward only: Light -> Middle -> Heavy).
+    // No demotion to lower tiers (prioritize cache effects and predictable response quality).
     const tierCascade = (load: TierName): TierName[] =>
       load === "light"
         ? ["light", "middle", "heavy"]
@@ -2807,15 +2805,15 @@ export default Plugin.define({
           : ["heavy"]
 
     // ------------------------------------------------------------------
-    // ルーティング(experimental.model.resolve)
+    // Routing (experimental.model.resolve)
     // ------------------------------------------------------------------
-    // Routing Score(v0.5.1):
-    //   score = 自動観測の成功率 × 0.65 + 人間レビュー評価 × 0.35
-    //         - costWeight    × 正規化コスト(候補間の相対比)
-    //         - latencyWeight × 正規化レイテンシ(候補間の相対比。0〜1)
-    // 人間評価は1〜5を0〜1へ正規化し、ベータ分布的に平滑化する。
-    // タスク種別統計が十分(minObservations 以上)ならそれを優先し、
-    // 不足なら全体統計、なければ中立値 0.5 にフォールバックする。
+    // Routing Score (v0.5.1):
+    //   score = automatic-observation success rate x 0.65 + human review rating x 0.35
+    //         - costWeight    x normalized cost (relative ratio among candidates)
+    //         - latencyWeight x normalized latency (relative ratio among candidates. 0-1)
+    // Human ratings are normalized from 1-5 to 0-1 and smoothed beta-distribution-style.
+    // If per-task-category stats are sufficient (>= minObservations), they take priority;
+    // otherwise fall back to overall stats, then to the neutral 0.5.
     const statScore = (
       stat: Stat,
       feedback: unknown,
@@ -2844,21 +2842,21 @@ export default Plugin.define({
       { providerID: string; id: string; reason: string } | undefined
     > => {
       const currentProvider = currentRef.slice(0, currentRef.indexOf("/"))
-      // 緊急拡大: rescue 時に候補を全プロバイダーに拡大して退避先を探す。
-      // ホワイトリストも緊急時は無視する(予算内のモデルに限る)。
-      // - 現プロバイダーがプロバイダー冷却中(無料枠はアカウント単位で全滅)
-      // - crossProvider 時は常に(ホワイトリストの無料モデルが全滅しても、
-      //   予算内の有料モデルへシームレスに退避できるようにするため)
+      // Emergency expansion: on rescue, widen candidates to all providers to find a fallback target.
+      // The whitelist is also ignored in emergencies (limited to models within budget).
+      // - When the current provider is provider-cooling (free tier is down account-wide)
+      // - Always with crossProvider (so that even if the whitelist's free models are all down,
+      //   we can seamlessly fall back to paid models within budget)
       const emergency =
         rescue && (providerCool(currentProvider) || cfg.crossProvider)
       let models = await candidates(emergency)
       if (models.length === 0) return undefined
 
-      // ティア選択(v0.8): 負荷帯が決まっているときは、候補をティア内の
-      // 健全(非クールダウン)モデルに絞る。層内では既存の statScore+探索が
-      // そのまま働く。該当ティアが枯渇していれば上方カスケード
-      // (Light→Middle→Heavy)、全ティア枯渇なら従来の全候補選択に縮退。
-      // :free 接尾辞の有無は同一モデル扱い(benchmarkFor と同じ正規化)。
+      // Tier selection (v0.8): when the load band is set, narrow candidates to
+      // healthy (not cooling down) models within the tier. Within a tier, the existing statScore+exploration
+      // works untouched. If the tier is exhausted, cascade upward
+      // (Light -> Middle -> Heavy); if all tiers are exhausted, degrade to legacy all-candidate selection.
+      // Presence of the :free suffix is treated as the same model (same normalization as benchmarkFor).
       let tierTag: TierName | undefined
       const load = sessionID ? sessionLoad.get(sessionID) : undefined
       if (cfg.tierMode !== "off" && load) {
@@ -2871,9 +2869,9 @@ export default Plugin.define({
             for (const m of models) {
               const ref = refFor(m.providerID, m.id)
               if (!allowed.has(normRef(ref)) || cool(ref)) continue
-              // rescue 時は「観測のあるティア」だけを実在とみなす(v0.8 監査修正)。
-              // 未観測モデルのみのティアへ絞ると rescue の healthy フィルタ
-              // (n>0)で空になり、上方カスケードが働かず退避先なしになるため。
+              // On rescue, only tiers with observed records count as real (v0.8 audit fix).
+              // Narrowing to an all-unobserved tier makes rescue's healthy filter
+              // (n>0) empty, breaking the upward cascade and leaving no fallback target.
               if (rescue) {
                 const st = await loadStat(m.providerID, m.id)
                 if (!st || st.success + st.failure === 0) continue
@@ -2895,8 +2893,8 @@ export default Plugin.define({
       const tierPrefix = () => (tierTag ? `tier:${tierTag} ` : "")
 
       const maxCost = Math.max(...models.map((m) => m.cost[0].output)) || 1
-      // ベンチマーク事前(v0.6): 予算フィルタ通過後の候補に適用する。
-      // ファイルが無い場合 / k=0 の場合は benchmark 側が無効化される。
+      // Benchmark prior (v0.6): applied to candidates after the budget filter.
+      // If the file is missing / k=0, the benchmark side is disabled.
       const benchmarks = loadBenchmarks()
       const benchK = benchmarkPriorK(benchmarks)
 
@@ -2960,14 +2958,14 @@ export default Plugin.define({
         }
         const feedback = await loadFeedback(model.providerID, model.id)
         const human = feedbackScore(feedback as Record<string, unknown> | undefined)
-        // 人間評価だけがあれば、未観測でも完全に0.5とは扱わない
+        // With only human ratings, do not treat unobserved models as a flat 0.5
         const coldMachine = blendBenchmarkPrior(0, 0, benchmark, benchK)
         entries.push({ ref, providerID: model.providerID, id: model.id, n: 0, avgMs: 0, score: 0.65 * coldMachine + 0.35 * human })
       }
-      // レイテンシを候補間の相対比で正規化して減点する。
-      // (以前の avgMs / 60_000 で固定だったため、0.5秒程度のモデルでも
-      //  0.003 程度しか減点されず、軽さが実質無視されていた)
-      // 観測済み候補の最大値を基準とし、未観測の候補には中立の0.5を使う。
+      // Penalize latency normalized by the relative ratio among candidates.
+      // (Previously fixed at avgMs / 60_000, so a ~0.5s model was only penalized
+      //  by ~0.003 and snappiness was effectively ignored)
+      // Use the max among observed candidates as the baseline; unobserved candidates get the neutral 0.5.
       {
         const observed =
           entries.filter((e) => e.n > 0 && e.avgMs > 0).map((e) => e.avgMs)
@@ -2978,15 +2976,15 @@ export default Plugin.define({
           entry.score -= cfg.latencyWeight * rel
         }
       }
-      // クールダウン中(直近で「利用不可」になった)モデルは除外する。
-      // cool() はプロバイダー単位の冷却も照会する(無料枠全滅前提)。
+      // Exclude models in cooldown (recently "unavailable").
+      // cool() also checks provider-scoped cooldowns (assuming the free tier goes down together).
       const usable = entries.filter((e) => !cool(e.ref))
-      // rescue(現モデルが利用不可/クールダウン中)時は:
-      //  - 観測のある健康なモデルから最良スコアを選ぶ(未検証への退避をしない)
-      //  - 探索はしない。現モデルは候補から外す
-      //  - ルーティング OFF でもこの経路だけは動く(セッション硬直の防止)
-      //  - 現プロバイダーがプロバイダー冷却中(無料枠はアカウント単位で
-      //    全滅)なら、候補を全プロバイダーに緊急拡大して退避先を探す
+      // During rescue (current model unavailable/cooling down):
+      //  - pick the best-scoring observed healthy model (no fallback to unverified models)
+      //  - no exploration. The current model is excluded from candidates
+      //  - this path runs even with routing OFF (prevents session stalls)
+      //  - if the current provider is provider-cooling (free tier is down account-wide),
+      //    emergency-expand candidates to all providers to find a fallback target
       if (rescue) {
         if (usable.length === 0) return undefined
         const healthy = usable.filter(
@@ -3007,17 +3005,17 @@ export default Plugin.define({
         }
       }
       if (usable.length === 0) return undefined
-      // crossProvider 時は保守的に: 観測のないモデル(n=0)を差し替え先に
-      // しない。未検証モデルへのなりゆきの差し替えを防ぐ。
-      // ただし現在と同じプロバイダーのモデルは従来どおり cold-start を許可。
+      // Conservative with crossProvider: do not use unobserved models (n=0) as replacement targets.
+      // Prevents turnout replacements with unverified models.
+      // Note: models of the current provider still allow cold-start as before.
       const eligible = cfg.crossProvider
         ? usable.filter((e) => e.n > 0 || e.providerID === currentProvider)
         : usable
       if (eligible.length === 0) return undefined
-      // 探索(ε-greedy + 学習期間):
-      // - 観測が少ないモデル(minObservations 未満)が残っている間は learningRate
-      //   を探索率とし、そのような「cold なモデル」だけを候補にする。
-      // - 全モデルが十分観測された後は通常の exploreRate で全候補から選ぶ。
+      // Exploration (eps-greedy + learning period):
+      // - While models with little observation (< minObservations) remain, learningRate
+      //   is the exploration rate, and only such "cold" models are candidates.
+      // - After all models are sufficiently observed, pick from all candidates at the usual exploreRate.
       const cold = eligible.filter(
         (e) => e.n < cfg.minObservations && e.ref !== currentRef,
       )
@@ -3046,27 +3044,27 @@ export default Plugin.define({
     }
 
     await ctx.session.hook("experimental.model.resolve", async (event) => {
-      // デバッグ(v0.8.1 検証): フックの発火と kind を必ず記録する。
-      // 発火しないならルーティング経路自体がこの環境で無効ということになる。
+      // Debug (v0.8.1 verification): always record hook firing and kind.
+      // If it does not fire, the routing path itself is disabled in this environment.
       logRoute(
         `RESOLVE kind=${event.kind} ${event.model.providerID}/${event.model.id} agent=${event.agent ?? "?"}`,
       )
-      // 実 dispatch モデルを記録(事前rescue・誤犯人判定のフォールバック用)。
-      // kinds フィルタ前に取る(title 等の補助 dispatch も実 dispatch のため)。
+      // Record the actual dispatched model (fallback for pre-rescue and culprit misidentification).
+      // Taken before the kinds filter (title and other auxiliary dispatches are also real dispatches).
       lastResolved.set(event.sessionID, {
         providerID: event.model.providerID,
         id: event.model.id,
       })
       if (!kinds.includes(event.kind)) return
-      // 単一プロバイダー時は対象プロバイダー以外を触らない。
-      // crossProvider 時はどのプロバイダーのリクエストも再ルーティング対象。
+      // Single provider: do not touch providers other than the target.
+      // crossProvider: requests of every provider are subject to re-routing.
       if (!cfg.crossProvider && event.model.providerID !== cfg.providerID)
         return
       const currentRef = refFor(event.model.providerID, event.model.id)
-      // rescue 判定: 現モデルがクールダウン中(直近で利用不可)なら、
-      // ルーティング OFF でも介入して健康なモデルへ退避する。
-      // (無料枠のモデルはカタログ上 enabled のまま resolve 不可に
-      // なるため、検知は失敗履歴=クールダウンで行う)
+      // Rescue decision: if the current model is cooling down (recently unavailable),
+      // intervene even with routing OFF and fall back to a healthy model.
+      // (Free-tier models remain enabled in the catalog but resolve becomes impossible,
+      //  so detection is based on failure history = cooldown)
       const rescue = cool(currentRef)
       if (!cfg.enabled && !rescue) {
         logRoute(`SKIP ${event.kind} ${currentRef} (routing off, alive)`)
@@ -3087,26 +3085,25 @@ export default Plugin.define({
       const nextRef = refFor(choice.providerID, choice.id)
       if (nextRef === currentRef) return
 
-      // OpenCode 2.3 の model.resolve 経路は「同一プロバイダーへの書き換え」
-      // しか解決しない(本体は y.providerID === m.providerID のときだけ
-      // resolve し、異プロバイダーは即 ModelUnavailableError を投げる)。
-      // そのため resolve フック内での差し替えは同一プロバイダーに限定し、
-      // 異プロバイダーへの退避は switchModel(手動モデル選択と同じ経路)で
-      // セッションモデルを更新して次の dispatch から適用する。
+      // OpenCode 2.3's model.resolve path only resolves "same-provider rewrites"
+      // (the core only resolves when y.providerID === m.providerID;
+      // cross-provider throws ModelUnavailableError immediately).
+      // Therefore swaps inside the resolve hook are limited to the same provider,
+      // and cross-provider fallback happens via switchModel (the same path as manual model selection)
+      // by updating the session model so the next dispatch uses it.
       if (choice.providerID === event.model.providerID) {
         event.model = { providerID: choice.providerID, id: choice.id }
         logRoute(
           `ROUTE ${event.kind} ${currentRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
         )
-        // ルーティング結果をセッションの保存モデルにも永続化する(v0.8.1 修正)。
-        // resolve による差し替えは dispatch 単位で、保存モデルは元のまま。
-        // クオータ死したモデルが保存されたままだと、drain(キュー再開)や
-        // 再起動後の再開が保存モデルを直接使って ModelUnavailableError で
-        // 強制停止するため、ここで健康なモデルへ揃えておく。
-        // ただし保存するのは救済(rescue)による差し替えの場合だけにする。
-        // 通常のスコアルーティングまで保存すると、step ごとにセッション
-        // モデルが書き換わり、キャッシュが切れ・意図しない有料モデルが
-        // 永続化されるため、恒久的な挙動変更は rescue に限定する。
+        // Persist the routing result into the session's saved model as well (v0.8.1 fix).
+        // resolve swaps are per-dispatch; the saved model remains the original.
+        // If a quota-dead model stays saved, drain (resume from the queue) or resume after restart
+        // would use the saved model directly and force-stop on ModelUnavailableError,
+        // so align it to a healthy model here.
+        // Note: persist only when the swap is a rescue fallback.
+        // Saving even ordinary score-routing swaps would rewrite the session model on every step,
+        // breaking caches and persisting unintended paid models — persistent behavior changes are limited to rescue.
         if (rescue) {
           try {
             await ctx.session.switchModel({
@@ -3114,15 +3111,15 @@ export default Plugin.define({
               model: { providerID: choice.providerID, id: choice.id },
             })
           } catch {
-            // 永続化の失敗は当該 dispatch の差し替えに影響しない
+            // Persist failure does not affect the swap for the current dispatch
           }
         }
         return
       }
 
-      // 異プロバイダーへの退避(rescue 時のみ)。当該 dispatch は現モデルの
-      // まま進む(死んでいれば after-fail が続く)。セッションモデルを
-      // 切り替えることで、次の dispatch から確実に健康モデルを使う。
+      // Cross-provider fallback (rescue only). The current dispatch proceeds with the current model
+      // (if it is dead, after-fail follows). Switching the session model
+      // ensures a healthy model is used from the next dispatch.
       if (rescue) {
         try {
           await ctx.session.switchModel({
@@ -3144,25 +3141,26 @@ export default Plugin.define({
         }
         return
       }
-      // 通常ルーティングでの異プロバイダー差し替えは行わない。
-      // 行うと dispatch ごとにプロバイダーが往復し、キャッシュが切れて
-      // コスト・レイテンシが悪化するため(swipe 問題)。
+      // Cross-provider swaps are not done during normal routing.
+      // They would ping-pong providers on every dispatch, breaking caches
+      // and worse cost/latency (the swipe problem).
       logRoute(
         `KEEP ${event.kind} ${currentRef} (cross-provider best=${choice.providerID}/${choice.id}, no rewrite)`,
       )
     })
 
     // ------------------------------------------------------------------
-    // 手動レビュー(応答の1〜5評価 + 3行サマリー)
+    // Manual review (1-5 rating of the response + 3-line summary)
     // ------------------------------------------------------------------
-    // v0.9.0: offset の正規化(0=最新, 1=1個前…)。不正値は 0 に倒す。
+    // v0.9.0: normalize offset (0 = latest, 1 = one before ...). Invalid values fall to 0.
     const normalizeOffset = (value: unknown): number => {
       const n = Number(value)
       if (!Number.isFinite(n) || n < 0) return 0
       return Math.min(Math.floor(n), 50)
     }
-    // セッションに紐づくトポロジー統計を表示用スナップショットで返す。
-    // D-3: コスパ評価に加え、観測実績(実行回数/ok率/実測レイテンシ/品質)も返す。
+    // Return the topology stats tied to the session as a display snapshot.
+    // D-3: includes not only the cost-performance rating, but also observed records
+    // (run count / ok rate / measured latency / quality).
     const topologySnapshot = async (sessionID: string) => {
       const topology = sessionTopology.get(sessionID) ?? "single"
       const stat = await loadTopologyStat(TOPOLOGY_PREFIX + topology)
@@ -3200,7 +3198,7 @@ export default Plugin.define({
           feedbackAverage: 0,
           feedbackCount: 0,
           ...(await topologySnapshot(sessionID)),
-          // sequential-chain の計画(注入済みの場合)。optional はキーごと省略
+          // sequential-chain plan (when injected). optional means omitting the key entirely
           ...(chainPlans.has(sessionID)
             ? { chainPlan: chainPlans.get(sessionID)!.plan }
             : {}),
@@ -3223,11 +3221,11 @@ export default Plugin.define({
               instruction: auto.instruction / autoTotal,
               accuracy: auto.accuracy / autoTotal,
               completeness: auto.completeness / autoTotal,
-              // v0.9.0: コストパフォーマンス軸(収集済みの分だけ平均)
+              // v0.9.0: cost-performance axis (efficiency) average (only for collected samples)
               ...((auto.efficiencyCount ?? 0) > 0
                 ? { efficiency: auto.efficiency / auto.efficiencyCount }
                 : {}),
-              // v0.9.0: 直近の実績列挙
+              // v0.9.0: enumeration of recent accomplishments
               ...(auto.results && auto.results.length > 0
                 ? { results: auto.results }
                 : {}),
@@ -3249,19 +3247,18 @@ export default Plugin.define({
         responseLength: target.text.length,
         feedbackAverage: count > 0 ? (feedback?.ratingSum ?? 0) / count : 0,
         feedbackCount: count,
-        // v0.9.0: ターン統計(入出力トークン/コスト/実測速度)。記録が
-        // あるターンのみ含める(optional)
+        // v0.9.0: turn statistics (input/output tokens / cost / measured speed). Included only for turns that have it (optional)
         ...(target.turn ? { turn: target.turn } : {}),
         ...(await topologySnapshot(sessionID)),
-        // sequential-chain の計画(注入済みの場合)。optional はキーごと省略
+        // sequential-chain plan (when injected). optional means omitting the key entirely
         ...(chainPlans.has(sessionID)
           ? { chainPlan: chainPlans.get(sessionID)!.plan }
           : {}),
-        // ティアルーティング(v0.8): このセッションの負荷帯(optional)
+        // Tier routing (v0.8): this session's load band (optional)
         ...(sessionLoad.has(sessionID)
           ? { load: sessionLoad.get(sessionID)! }
           : {}),
-        // RPCスキーマは optional object。undefined をキーとして渡さない
+        // RPC schema is an optional object. Never pass undefined as a key
         ...(autoReview ? { autoReview } : {}),
       }
     }
@@ -3399,11 +3396,11 @@ export default Plugin.define({
       }
     }
     // ------------------------------------------------------------------
-    // プローブ(候補モデルへの一斉ヘルスチェック)
+    // Probe (bulk health check of candidate models)
     // ------------------------------------------------------------------
-    // 候補(ホワイトリスト優先、なければ全候補の先頭16件)に軽量プロンプトを
-    // 送り、応答の成否・レイテンシを評価して統計に記録する。
-    // ルーティング ON 前の「事前テスト」と、利用不可モデルの事前排除に使う。
+    // Send a lightweight prompt to candidates (whitelist first; otherwise the first 16 of all candidates),
+    // and record pass/fail and latency into stats.
+    // Used as a "pre-test" before enabling routing and to exclude unavailable models up front.
     const PROBE_PROMPT = "Reply with exactly: OK"
     const PROBE_LIMIT = 16
     const PROBE_CONCURRENCY = 4
@@ -3485,7 +3482,7 @@ export default Plugin.define({
         const ref = refFor(r.model.providerID, r.model.id)
         if (r.ok) {
           okCount += 1
-          // 成功は学習統計に記録し、クールダウンを解除する
+          // Success: record into learning stats and lift the cooldown
           clearCooldown(ref)
           await record(
             r.model.id,
@@ -3497,8 +3494,8 @@ export default Plugin.define({
           )
           lines.push(`ok   ${Math.round(r.ms)}ms  ${ref}  "${r.preview}"`)
         } else {
-          // 失敗の種別: 無料枠・レート制限(quota)は品質ペナルティに
-          // しない。統計の成功率を歪めない。クールダウンは課す。
+          // Failure types: free tier / rate limit (quota) does not go into the quality penalty.
+          // Do not skew the stats success rate. The cooldown is applied.
           const cls = classifyFailure({ message: r.note })
           markFailure(ref, cls)
           if (cls === "error")
@@ -3524,7 +3521,7 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
-    // RPC(TUI 部から呼び出される)
+    // RPC (called from the TUI part)
     // ------------------------------------------------------------------
     const buildStatsText = async (): Promise<string> => {
       const lines: string[] = []
@@ -3583,7 +3580,7 @@ export default Plugin.define({
           )
         }
       }
-      // Jev の利用可否とトポロジー判定の状態
+          // Jev availability and topology-mode status
       if (cfg.jevMode === "off") {
         lines.push(
           tr(
@@ -3719,7 +3716,7 @@ export default Plugin.define({
       const globalAutoEntries = autoPage.entries.filter(
         (entry) => !entry.key.startsWith(TASK_AUTO_PREFIX),
       )
-      // shadow vs 人間評価の乖離(突合)用に、ref → 平均を集めておく
+      // Collect ref -> average here for the shadow-vs-human divergence (reconciliation)
       const autoAvgByRef = new Map<string, number>()
       const reviewerAgg = new Map<string, { total: number; sum: number }>()
       if (globalAutoEntries.length > 0) {
@@ -3743,7 +3740,7 @@ export default Plugin.define({
             `- ${refFor(stat.model.providerID, stat.model.id)}: ${avg.toFixed(2)}/5 (${stat.total} ${tr("件", "entries")}, reviewer ${stat.reviewerRef ?? "-"})`,
           )
         }
-        // 審査モデル別の分布(自己採点バイアス検出用、リスク2)
+        // Distribution per reviewer model (for detecting self-scoring bias, risk 2)
         if (reviewerAgg.size > 1) {
           lines.push(tr("審査モデル別(shadow):", "By reviewer model (shadow):"))
           for (const [reviewer, agg] of reviewerAgg) {
@@ -3753,7 +3750,7 @@ export default Plugin.define({
             )
           }
         }
-        // skip 記録(A-2): 審査できなかった事実
+        // skip log (A-2): the fact that a review could not run
         const skip = await loadAutoSkip()
         if (skip && skip.total > 0) {
           lines.push(
@@ -3766,7 +3763,7 @@ export default Plugin.define({
             lines.push(`- ${r.at} ${r.reviewerRef} (${r.reason})`)
           }
         }
-        // shadow vs 人間評価の乖離(突合、A-4 の完了条件 "|乖離| < 1.0")
+        // shadow vs human divergence (reconciliation, completion criterion of A-4 "|divergence| < 1.0")
         const divergences: string[] = []
         for (const entry of globalFeedbackEntries) {
           const fstat = entry.value as FeedbackStat
@@ -3795,7 +3792,7 @@ export default Plugin.define({
         }
       }
 
-      // トポロジー観測(v0.7a): 判定した形態ごとの実行結果
+      // Topology observation (v0.7a): execution results per judged shape
       const topologyPage = await ctx.storage.scan({
         prefix: TOPOLOGY_PREFIX,
         limit: 100,
@@ -3821,8 +3818,8 @@ export default Plugin.define({
                 "(chain execution: off — decision and recording only / toggle with /fusion-chainmode)",
               ),
         )
-        // ティアルーティング(v0.8): モードと層ごとの集計を表示する。
-        // 集計はティア構成メンバーの全体統計を合算した導出値(追加の保存なし)
+        // Tier routing (v0.8): show mode and per-tier aggregates.
+        // Aggregates are derived values summing overall stats of tier members (no extra storage)
         if (cfg.tierMode !== "off") {
           const tiers = resolveTiers()
           if (!tiers) {
@@ -3979,63 +3976,46 @@ export default Plugin.define({
       lastResolved.clear()
     }
 
-    // 設定の部分更新(検証済みの値のみ適用し、保存する)
+    // Partial config update (only validated values are applied and saved)
     const applyConfigUpdate = (update: Record<string, unknown>) => {
       if (typeof update.enabled === "boolean") cfg.enabled = update.enabled
       if (typeof update.providerID === "string" && update.providerID.length > 0) {
-        // プロバイダー変更時、ホワイトリストは旧プロバイダーのモデルIDを
-        // 含むため原則クリアする(update 内に models がある場合はそちらを優先)
+        // When the provider changes, the whitelist contains old provider model IDs, so it should be cleared by default.
+        // However, if update.models is provided, that takes precedence.
         if (update.providerID !== cfg.providerID && !("models" in update))
           cfg.models = []
         cfg.providerID = update.providerID
       }
       if (typeof update.crossProvider === "boolean") {
-        // crossProvider 切替時はホワイトリストの記法が変わる
-        // (モデルID ⇔ provider/model-id)ため原則クリアする
+        // Switching crossProvider changes the whitelist format (model IDs vs provider/model-ids), so clear by default.
+        // However, if update.models is provided, that takes precedence.
         if (update.crossProvider !== cfg.crossProvider && !("models" in update))
           cfg.models = []
         cfg.crossProvider = update.crossProvider
       }
-      if (typeof update.exploreRate === "number")
-        cfg.exploreRate = clamp(update.exploreRate, 0, 1)
-      if (typeof update.learningRate === "number")
-        cfg.learningRate = clamp(update.learningRate, 0, 1)
-      if (typeof update.minObservations === "number")
-        cfg.minObservations = Math.max(1, Math.floor(update.minObservations))
-      if (typeof update.costWeight === "number")
-        cfg.costWeight = update.costWeight
-      if (typeof update.latencyWeight === "number")
-        cfg.latencyWeight = update.latencyWeight
-      if (typeof update.maxInputCost === "number")
-        cfg.maxInputCost = Math.max(0, update.maxInputCost)
-      if (typeof update.maxOutputCost === "number")
-        cfg.maxOutputCost = Math.max(0, update.maxOutputCost)
-      if (typeof update.benchmarkPriorWeight === "number")
-        cfg.benchmarkPriorWeight = Math.max(0, update.benchmarkPriorWeight)
-      if (typeof update.benchmarksFile === "string")
-        cfg.benchmarksFile = update.benchmarksFile
-      if (update.jevMode === "auto" || update.jevMode === "off")
-        cfg.jevMode = update.jevMode
-      if (update.topologyMode === "auto" || update.topologyMode === "fixed")
-        cfg.topologyMode = update.topologyMode
-      if (typeof update.maxTopologyCalls === "number")
-        cfg.maxTopologyCalls = clamp(Math.floor(update.maxTopologyCalls), 1, 16)
-      if (typeof update.topologyWeightJev === "number")
-        cfg.topologyWeightJev = clamp(update.topologyWeightJev, 0, 1)
-      if (typeof update.topologyWeightHumanCP === "number")
-        cfg.topologyWeightHumanCP = clamp(update.topologyWeightHumanCP, 0, 1)
-      if (typeof update.topologyWeightAuto === "number")
-        cfg.topologyWeightAuto = clamp(update.topologyWeightAuto, 0, 1)
-      if (update.chainMode === "active" || update.chainMode === "off")
-        cfg.chainMode = update.chainMode
+      if (typeof update.exploreRate === "number") cfg.exploreRate = clamp(update.exploreRate, 0, 1)
+      if (typeof update.learningRate === "number") cfg.learningRate = clamp(update.learningRate, 0, 1)
+      if (typeof update.minObservations === "number") cfg.minObservations = Math.max(1, Math.floor(update.minObservations))
+      if (typeof update.costWeight === "number") cfg.costWeight = update.costWeight
+      if (typeof update.latencyWeight === "number") cfg.latencyWeight = update.latencyWeight
+      if (typeof update.maxInputCost === "number") cfg.maxInputCost = Math.max(0, update.maxInputCost)
+      if (typeof update.maxOutputCost === "number") cfg.maxOutputCost = Math.max(0, update.maxOutputCost)
+      if (typeof update.benchmarkPriorWeight === "number") cfg.benchmarkPriorWeight = Math.max(0, update.benchmarkPriorWeight)
+      if (typeof update.benchmarksFile === "string") cfg.benchmarksFile = update.benchmarksFile
+      if (update.jevMode === "auto" || update.jevMode === "off") cfg.jevMode = update.jevMode
+      if (update.topologyMode === "auto" || update.topologyMode === "fixed") cfg.topologyMode = update.topologyMode
+      if (typeof update.maxTopologyCalls === "number") cfg.maxTopologyCalls = clamp(Math.floor(update.maxTopologyCalls), 1, 16)
+      if (typeof update.topologyWeightJev === "number") cfg.topologyWeightJev = clamp(update.topologyWeightJev, 0, 1)
+      if (typeof update.topologyWeightHumanCP === "number") cfg.topologyWeightHumanCP = clamp(update.topologyWeightHumanCP, 0, 1)
+      if (typeof update.topologyWeightAuto === "number") cfg.topologyWeightAuto = clamp(update.topologyWeightAuto, 0, 1)
+      if (update.chainMode === "active" || update.chainMode === "off") cfg.chainMode = update.chainMode
       if (
         update.tierMode === "off" ||
         update.tierMode === "manual" ||
         update.tierMode === "auto"
       )
         cfg.tierMode = update.tierMode
-      if (update.tiers && typeof update.tiers === "object")
-        cfg.tiers = sanitizeTiers(update.tiers)
+      if (update.tiers && typeof update.tiers === "object") cfg.tiers = sanitizeTiers(update.tiers)
       if (
         Array.isArray(update.allowedTopologies) &&
         update.allowedTopologies.every((t) => typeof t === "string")
@@ -4050,15 +4030,15 @@ export default Plugin.define({
           update.classifierModel.includes("/") ? update.classifierModel : null
       }
       if (typeof update.reviewModel === "string") {
-        // 空文字は審査モデルの未設定(= classifierModel/共有フォールバックへ戻す)
+        // Empty string means the review model is unset (= revert to classifierModel / shared fallback)
         if (update.reviewModel.length === 0) cfg.reviewModel = null
         else if (update.reviewModel.includes("/"))
           cfg.reviewModel = update.reviewModel
       }
       if (Array.isArray(update.models) && update.models.every((m) => typeof m === "string"))
         cfg.models = update.models as string[]
-      // 表示言語(v0.9.0)。インストールごとの既定は options.lang だが、
-      // /fusion-lang での切替を保存して以後の表示に反映する。
+      // Display language (v0.9.0). Default per install is options.lang,
+      // but the switch with /fusion-lang is persisted and reflected in later display.
       if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang
     }
 
