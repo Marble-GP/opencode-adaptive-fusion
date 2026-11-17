@@ -63,7 +63,8 @@
   alias.
 - **Slash-command cleanup**: `/fusion-audit` and `/fusion-costcap` removed —
   both are covered by `/fusion-params` (`audit`, `costin`/`costout`). The
-  command set is now 15 entries, each with a unique job: display
+  command set is now 17 entries (16 dialogs: `params`/`weights` share one),
+  each with a unique job: display
   (`stats`, `config`, `lang`), routing control (`toggle`, `provider`,
   `whitelist`), coefficient tuning (`params`), mode selectors
   (`chainmode`, `variantmode`, `tiermode`), list/string editors (`tiers`,

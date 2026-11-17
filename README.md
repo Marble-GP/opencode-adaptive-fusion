@@ -205,7 +205,7 @@ you configure plus optional Jev calls.
 3. When enough observations exist, enable routing with `/fusion-toggle`.
 4. Review results with `/fusion-stats`, adjust candidates with `/fusion-whitelist`,
    and rate responses with `/fusion-review`. The [slash command
-   reference](#commands) documents all 15 commands, their dialogs and what each
+   reference](#commands) documents all 17 commands, their dialogs and what each
    one persists.
 
 **Cost cap is zero by default.** When the whitelist is empty, only models whose
