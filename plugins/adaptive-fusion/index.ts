@@ -19,6 +19,10 @@
 // Failure detection and safe fallback:
 //  - resolve-level "model unavailable" (Model unavailable) is detected from session.step.failed /
 //    session.retry.scheduled events; the offending model is cooled down and excluded from candidates
+//  - v1.1: session.retry.scheduled is a retry announcement, not a failure — transient
+//    failures are counted per session/model and rescue only runs after
+//    rescueAttemptsBeforeSwitch (default 3) consecutive attempts; definitive
+//    signals (Model unavailable / quota) still rescue immediately
 //  - Free-tier (quota) failures are excluded from the quality penalty and only get a long cooldown (6h)
 //  - quota failures cool down per provider (free tier is account-wide)
 //  - when a successful HTTP observation arrives, the cooldown is lifted (recovery detection)
@@ -248,6 +252,11 @@ type FusionConfig = {
   // gates pass: sample gate, quality-axis selection, and shadow/human
   // divergence check (see autoReviewScore / effectiveAutoWeight).
   autoReviewWeight: number
+  // Rescue (v1.1): how many consecutive transient failures on the same
+  // session/model are allowed before the model is cooled down and the session
+  // is switched. Definitive signals (Model unavailable / quota) rescue
+  // immediately because retrying them cannot succeed. Default 3.
+  rescueAttemptsBeforeSwitch: number
 }
 
 // Load bands (three levels of task/intelligence load). The difficulty score 0-100 is
@@ -392,6 +401,13 @@ export default Plugin.define({
       // Weight of the independent-audit auto-review signal. 0 (default) = shadow
       // only, i.e. displayed but not used for routing.
       autoReviewWeight: clamp(num(ctx.options.autoReviewWeight, 0), 0, 1),
+      rescueAttemptsBeforeSwitch: Math.max(
+        1,
+        Math.min(
+          10,
+          Math.floor(num(ctx.options.rescueAttemptsBeforeSwitch, 3)),
+        ),
+      ),
     }
 
     // Display-language helper (v0.9.0). First argument is Japanese, second is English.
@@ -475,6 +491,11 @@ export default Plugin.define({
       if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
       if (typeof s.autoReviewWeight === "number")
         cfg.autoReviewWeight = clamp(s.autoReviewWeight, 0, 1)
+      if (typeof s.rescueAttemptsBeforeSwitch === "number")
+        cfg.rescueAttemptsBeforeSwitch = Math.max(
+          1,
+          Math.min(10, Math.floor(s.rescueAttemptsBeforeSwitch)),
+        )
       if (Array.isArray(s.kinds) && s.kinds.every((k) => typeof k === "string")) {
         cfg.kinds.length = 0
         cfg.kinds.push(...(s.kinds as string[]))
@@ -975,6 +996,99 @@ export default Plugin.define({
     }
 
     // ------------------------------------------------------------------
+    // Attempt-aware rescue (v1.1)
+    // ------------------------------------------------------------------
+    // OpenCode retries a failing request internally and emits
+    // session.retry.scheduled for every attempt. Treating that announcement as a
+    // terminal failure cooled the model down and switched the session on each
+    // retry, which produced the repeated "Switched model to ..." messages.
+    // Instead, count the actual failed attempts per session/model and rescue
+    // only after cfg.rescueAttemptsBeforeSwitch (default 3) failures.
+    // NOTE: "Model unavailable" and quota are definitive — retrying them cannot
+    // succeed — so they keep the v1.0 immediate rescue behavior.
+    //
+    // The same failed attempt is usually observed twice (http.response AND
+    // session.step.failed, within moments of each other). The counter
+    // therefore deduplicates observations closer together than
+    // ATTEMPT_DEDUPE_MS. This biases toward undercounting, i.e. fewer
+    // switches — never the switch storm this feature replaces.
+    const ATTEMPT_WINDOW_MS = 10 * 60_000 // consecutive-failure window
+    const ATTEMPT_DEDUPE_MS = 15_000 // same attempt seen via HTTP + event
+    const RESCUE_SUPPRESS_MS = 15_000 // never switch twice in one episode
+    const attemptFailures = new Map<string, { count: number; at: number }>()
+    const lastHttpFailure = new Map<string, { ref: string; at: number }>()
+    const rescueSwitchedAt = new Map<string, number>()
+
+    const attemptKey = (sessionID: string, ref: string) =>
+      `${sessionID}\n${ref}`
+    const attemptLimit = () =>
+      Math.max(1, Math.min(10, Math.floor(cfg.rescueAttemptsBeforeSwitch ?? 3)))
+
+    const peekAttemptFailures = (sessionID: string, ref: string) => {
+      const entry = attemptFailures.get(attemptKey(sessionID, ref))
+      if (!entry || Date.now() - entry.at > ATTEMPT_WINDOW_MS) return 0
+      return entry.count
+    }
+
+    // Record one failed attempt (deduplicated). Returns the updated count.
+    const noteAttemptFailure = (sessionID: string, ref: string) => {
+      const now = Date.now()
+      const key = attemptKey(sessionID, ref)
+      const entry = attemptFailures.get(key)
+      if (entry && now - entry.at <= ATTEMPT_DEDUPE_MS)
+        return entry.count // same attempt re-observed (HTTP + event)
+      if (entry && now - entry.at > ATTEMPT_WINDOW_MS) {
+        attemptFailures.set(key, { count: 1, at: now })
+        return 1
+      }
+      const count = (entry?.count ?? 0) + 1
+      attemptFailures.set(key, { count, at: now })
+      return count
+    }
+
+    const resetAttemptFailures = (sessionID: string, ref?: string) => {
+      if (ref) {
+        attemptFailures.delete(attemptKey(sessionID, ref))
+        return
+      }
+      const prefix = `${sessionID}\n`
+      for (const key of attemptFailures.keys())
+        if (key.startsWith(prefix)) attemptFailures.delete(key)
+    }
+
+    const rescueSuppressed = (sessionID: string) =>
+      Date.now() - (rescueSwitchedAt.get(sessionID) ?? 0) < RESCUE_SUPPRESS_MS
+
+    // Called after a successful rescue switch: reset the failed model's budget
+    // and suppress a second switch while the same failure episode is still
+    // producing events.
+    const markRescueSwitch = (sessionID: string, ref: string) => {
+      rescueSwitchedAt.set(sessionID, Date.now())
+      resetAttemptFailures(sessionID, ref)
+      lastHttpFailure.delete(sessionID)
+    }
+
+    // Record the attempt and decide whether the budget is exhausted. The gate
+    // stays closed (with a WAIT trace) while retries should still run.
+    const attemptGateOpen = (sessionID: string, ref: string) => {
+      const count = noteAttemptFailure(sessionID, ref)
+      const limit = attemptLimit()
+      if (count < limit) {
+        logRoute(
+          `WAIT ${sessionID} ${ref} attempt ${count}/${limit} (letting retries run)`,
+        )
+        return false
+      }
+      if (rescueSuppressed(sessionID)) {
+        logRoute(
+          `WAIT ${sessionID} ${ref} attempt ${count}/${limit} (rescue already switched)`,
+        )
+        return false
+      }
+      return true
+    }
+
+    // ------------------------------------------------------------------
     // Verified lifting of cooldowns (v0.8.1)
     // ------------------------------------------------------------------
     // Timer expiry != recovery (limits may lift in a different window), so
@@ -1048,6 +1162,9 @@ export default Plugin.define({
           types: ["session.step.failed", "session.retry.scheduled"],
           signal: abortEventWatch.signal,
         }) as AsyncIterable<{ type: string; data?: any }>) {
+          const sid = event.data?.sessionID
+          if (typeof sid !== "string") continue
+          const isRetry = event.type === "session.retry.scheduled"
           const message: string = event.data?.error?.message ?? ""
           const match = /^Model unavailable:\s*(\S+)/.exec(message)
           // Identify the failed model regardless of message format (v0.8.1).
@@ -1056,8 +1173,6 @@ export default Plugin.define({
           // never fires; this also covers prevention for environments where it does).
           let ref: string | undefined = match?.[1]
           if (!ref) {
-            const sid = event.data?.sessionID
-            if (typeof sid !== "string") continue
             // Mitigate mis-attribution (v0.8.1): session.model may already have been rewritten
             // to a healthy model by rescue's switchModel,
             // and blaming it would wrongly cool down a healthy model.
@@ -1089,9 +1204,49 @@ export default Plugin.define({
             body: event.data?.error?.response?.body,
           })
           if (!ref) continue
+
+          // v1.1: session.retry.scheduled is NOT a terminal failure — the core
+          // is about to retry the same request. Log the core's attempt number
+          // for the route log only; never cool down or switch here.
+          if (isRetry) {
+            logRoute(
+              `RETRY ${sid} ${ref} attempt ${event.data?.attempt ?? "?"} (no switch, ${peekAttemptFailures(sid, ref)}/${attemptLimit()} failed attempts)`,
+            )
+            continue
+          }
+
+          // "Model unavailable" and quota cannot be fixed by retrying, so they
+          // keep the v1.0 immediate rescue. Every other (transient) failure must
+          // first exhaust cfg.rescueAttemptsBeforeSwitch attempts.
+          const observed = lastHttpFailure.get(sid)
+          const seenViaHttp =
+            observed?.ref === ref &&
+            Date.now() - observed.at <= ATTEMPT_DEDUPE_MS
+          const definitive = cls === "quota" || match !== null
+          const allowSwitch = definitive
+            ? !rescueSuppressed(sid)
+            : attemptGateOpen(sid, ref)
+
+          if (!allowSwitch) {
+            // Passive learning still runs; the model stays for the remaining
+            // attempts (seenViaHttp means http.response already recorded it).
+            if (cls === "error" && !seenViaHttp) {
+              const slash = ref.indexOf("/")
+              await record(
+                ref.slice(slash + 1),
+                ref.slice(0, slash),
+                undefined,
+                false,
+                0,
+                true,
+              )
+            }
+            continue
+          }
+
           markFailure(ref, cls)
           // Quota failures are not penalized in quality (don't skew stats success rate)
-          if (cls === "error") {
+          if (cls === "error" && !seenViaHttp) {
             const slash = ref.indexOf("/")
             await record(
               ref.slice(slash + 1),
@@ -1105,35 +1260,41 @@ export default Plugin.define({
           // v1.0: cooldown marking + failure stats are passive learning and keep
           // running while OFF. The after-fail model switch is ACTIVE behavior —
           // skip it while OFF ("it switched models even though I turned it off").
-          if (cfg.enabled && typeof event.data?.sessionID === "string") {
+          if (cfg.enabled && !rescueSuppressed(sid)) {
             const targetRef = ref
-            const currentCategory = sessionCategory.get(event.data.sessionID)
+            const currentCategory = sessionCategory.get(sid)
             const choice = await pick(
               targetRef,
               currentCategory,
               true,
-              event.data.sessionID,
+              sid,
             )
             if (choice) {
+              const nextRef = refFor(choice.providerID, choice.id)
+              if (nextRef === targetRef) {
+                logRoute(
+                  `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
+                )
+                continue
+              }
               try {
                 await ctx.session.switchModel({
-                  sessionID: event.data.sessionID,
+                  sessionID: sid,
                   model: { providerID: choice.providerID, id: choice.id },
                 })
                 // Record the originally failed model as a restore candidate
-                if (targetRef !== refFor(choice.providerID, choice.id)) {
-                  rescueAttempts.set(event.data.sessionID, {
-                    originalRef: targetRef,
-                    deadline: Date.now() + RESCUE_WINDOW_MS,
-                  })
-                  void persistRescue()
-                }
+                rescueAttempts.set(sid, {
+                  originalRef: targetRef,
+                  deadline: Date.now() + RESCUE_WINDOW_MS,
+                })
+                void persistRescue()
+                markRescueSwitch(sid, targetRef)
                 logRoute(
                   `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
                 )
               } catch (error) {
                 logRoute(
-                  `after-fail rescue failed ${event.data.sessionID}: ${String(error).slice(0, 80)}`,
+                  `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
                 )
                 console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
               }
@@ -1144,6 +1305,23 @@ export default Plugin.define({
         // Failure to subscribe to events is ignored (can happen on reload)
       }
     })()
+
+    // ------------------------------------------------------------------
+    // Merge attempt tracking (v1.1)
+    // ------------------------------------------------------------------
+    // Record HTTP failures for deduplication against retry.scheduled
+    // events so that a single transient error only counts once.
+    const recordHttpFailure = (sid: string, ref: string) => {
+      if (!sid || !ref) return
+      const existing = lastHttpFailure.get(sid)
+      if (existing?.ref === ref) return
+      lastHttpFailure.set(sid, { ref, at: Date.now() })
+      if (lastHttpFailure.size > 256) {
+        const now = Date.now()
+        for (const [k, v] of lastHttpFailure.entries())
+          if (now - v.at > ATTEMPT_WINDOW_MS) lastHttpFailure.delete(k)
+      }
+    }
 
     // ------------------------------------------------------------------
     // Loading benchmark priors (v0.6)
@@ -3205,6 +3383,9 @@ export default Plugin.define({
         return
       }
 
+      // v1.1: Record this HTTP failure for deduplication against retry.scheduled
+      recordHttpFailure(event.sessionID, ref)
+
       // On failure: free tier / rate limit (quota) is excluded from the quality penalty,
       // and only a long cooldown is applied (do not skew stats success rate)
       const resp: any = event.response
@@ -3220,6 +3401,8 @@ export default Plugin.define({
         body: respText,
       })
       if (cls === "quota") {
+        // Definitive signal: retrying quota errors cannot succeed, so keep the
+        // v1.0 immediate cooldown + fallback (not attempt-gated).
         markFailure(ref, "quota")
         // Immediately after a failure, fall back the session model to a healthy candidate (v0.8.1).
         // So OpenCode's retry / the next step / drain resume
@@ -3229,7 +3412,48 @@ export default Plugin.define({
       }
       await record(observed.modelID, observed.providerID, category, false, ms)
       void recordTopology(event.sessionID, false, ms)
-      void switchSessionIfCooling(event.sessionID, category)
+      // v1.1: attempt-aware after-fail rescue. Transient failures wait for the
+      // attempt budget (attemptGateOpen logs WAIT while letting retries run);
+      // only when the budget is exhausted is the model cooled down and the
+      // session moved to a healthy candidate.
+      const sid = event.sessionID
+      if (!attemptGateOpen(sid, ref)) return
+      markFailure(ref, cls)
+      if (cfg.enabled && !rescueSuppressed(sid)) {
+        const targetRef = ref
+        const currentCategory = sessionCategory.get(sid)
+        const choice = await pick(targetRef, currentCategory, true, sid)
+        if (choice) {
+          const nextRef = refFor(choice.providerID, choice.id)
+          if (nextRef === targetRef) {
+            logRoute(
+              `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
+            )
+          } else {
+            try {
+              await ctx.session.switchModel({
+                sessionID: sid,
+                model: { providerID: choice.providerID, id: choice.id },
+              })
+              rescueAttempts.set(sid, {
+                originalRef: targetRef,
+                deadline: Date.now() + RESCUE_WINDOW_MS,
+              })
+              void persistRescue()
+              markRescueSwitch(sid, targetRef)
+              logRoute(
+                `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
+              )
+            } catch (error) {
+              logRoute(
+                `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
+              )
+              console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
+            }
+          }
+        }
+      }
+      void switchSessionIfCooling(sid, category)
     })
     // ------------------------------------------------------------------
     // Tier routing (v0.8, Copilot Fusion / HydraFusion style)
@@ -4611,6 +4835,11 @@ export default Plugin.define({
       if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang
       if (typeof update.autoReviewWeight === "number")
         cfg.autoReviewWeight = clamp(update.autoReviewWeight, 0, 1)
+      if (typeof update.rescueAttemptsBeforeSwitch === "number")
+        cfg.rescueAttemptsBeforeSwitch = Math.max(
+          1,
+          Math.min(10, Math.floor(update.rescueAttemptsBeforeSwitch)),
+        )
     }
 
     // 永続化用(jevAvailable のような導出値は保存しない)

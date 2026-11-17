@@ -17,11 +17,32 @@
   probability a non-greedy allowed topology is adopted, so non-single shapes
   can accumulate track records. Configurable via plugin options, the config
   RPC, and `/fusion-weights` (`topoexplore`).
+- **`topologyPriorStrength` (default 4, 1..20)**: pseudocount of the Bayesian
+  prior on topology rewards. Configurable via plugin options, the config RPC,
+  and `/fusion-weights` (`topo-prior`).
+- **Attempt-aware rescue (`rescueAttemptsBeforeSwitch`, default 3, 1..10)**:
+  transient failures no longer trigger an immediate model switch. Consecutive
+  failed attempts are counted per session/model (10 min window); rescue only
+  runs after the threshold is reached. `session.retry.scheduled` events are
+  treated as retry announcements, not terminal failures — they keep the
+  attempt counter in sync and never switch models. Definitive signals
+  (`Model unavailable`, quota) still rescue immediately because retrying them
+  cannot succeed. Configurable via plugin options, the config RPC, and
+  `/fusion-weights` (`rescuattempts`).
 
 ### Changed
 - Topology selection logs now carry the blended distribution and the selection
   trace (`heuristic` / `blend` / `explore`) in `/fusion-stats`'s route log
   instead of only `TOPOLOGY single`.
+- Route log now records the wait-for-retry decision (`WAIT ... attempt n/N`,
+  `RETRY ... attempt n/N (no switch)`) so switch storms are diagnosable.
+
+### Fixed
+- Frequent "Switched model to ..." churn: the after-fail event handler
+  previously treated every `session.retry.scheduled` (core retry
+  announcement) as a terminal failure, cooling the model down and switching
+  on each retry. Retries now wait for the attempt budget; a rescue switch
+  also suppresses a second switch for the same failure episode (15 s).
 
 ## [1.0.0] - 2026-11-17
 

@@ -257,7 +257,7 @@ defaults only.
 
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
-| `/fusion-weights` | Batch-adjusts the twelve routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore`). |
+| `/fusion-weights` | Batch-adjusts the thirteen routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
 | `/fusion-audit` | Sets the weight of the independent audit signal inside the routing quality term. `0` = shadow display only; `0.2` is typical when enabling it. Routing use stays behind gates: N ≥ 10 samples, quality axes only, and the weight is halved when audit vs human scores diverge by \|Δ\| ≥ 1.0. | `autoReviewWeight` (0..1) |
 | `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
 
@@ -332,6 +332,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `tiers` | all empty | Per-tier groups `{ heavy: [], middle: [], light: [] }` of `provider/model` refs. |
 | `jevMode` | `auto` | `auto` (enable when a key is found) / `off`. |
 | `lang` | `"ja"` | Display language of commands, stats and dialogs: `"ja"` (Japanese) or `"en"` (English). Per-install default via `options`; switch at runtime with `/fusion-lang`. |
+| `rescueAttemptsBeforeSwitch` | `3` | Rescue (after-fail): allow up to N consecutive transient failures before the session is moved to a healthy model. `session.retry.scheduled` events are not terminal failures; they keep the retry alive and only increase the attempt counter. Default 3, range 1..10. |
 
 ### How the routing score works
 
@@ -483,6 +484,16 @@ Turn: in 203 → out 513 tok
 
 - When a model is judged unusable (Model unavailable / quota), the session is moved
   to a healthy model **before the next prompt**, even with routing OFF.
+- **Attempt-aware rescue (v1.1):** a single failed request does not switch
+  models. OpenCode retries failing requests internally and announces each
+  retry with a `session.retry.scheduled` event; these are retry
+  announcements, not terminal failures. Transient failures are counted per
+  session/model, and rescue (cooldown + switch) only runs after
+  `rescueAttemptsBeforeSwitch` (default 3) consecutive failures within a
+  10-minute window. Definitive signals — `Model unavailable` and quota
+  errors — still rescue immediately because retrying them cannot succeed.
+  Each `/fusion-stats` route log shows the decision as
+  `RETRY ... attempt n/N (no switch)` or `WAIT ... attempt n/N`.
 - After the original model's cooldown clears (including provider quota cooldown), the
   session is **automatically restored** to it on a later prompt (24 h restore window).
 - **Verified cooldown:** the 1-hour quota timer expiring does *not* mean recovery.

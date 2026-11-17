@@ -186,6 +186,17 @@ const WEIGHT_FIELDS: {
     ja: "トポロジー選択におけるベイズ事前の疑似観測数(1..20)。大きいほど事前分布に強く引っ張られる",
     en: "pseudocount (1..20) of the Bayesian prior in topology selection; higher anchors more strongly to the prior",
   },
+  {
+    alias: "rescuattempts",
+    server: "rescueAttemptsBeforeSwitch",
+    min: 1,
+    max: 10,
+    integer: true,
+    sja: "レスキュー: 切替前に許す試行数",
+    sen: "rescue: attempts before switch",
+    ja: "レスキュー切替前に許す連続失敗回数（デフォルト 3、範囲 1..10）。\n- 1回目の失敗は待機し、リトライに備える",
+    en: "rescue: attempts before switch before the session is moved to a healthy model (default 3, range 1..10). 1st failure waits; let retries happen",
+  },
 ]
 
 // Presets for /fusion-weights (select option -> partial update).
@@ -230,6 +241,8 @@ type FusionConfig = {
   topologyExploreRate?: number
   // v1.1: Bayesian prior strength (pseudo-observations, 1..20)
   topologyPriorStrength?: number
+  // v1.1: rescue (after-fail) switch: allow up to N consecutive transient failures before the session is moved to a healthy model.
+  rescueAttemptsBeforeSwitch?: number
   chainMode?: "off" | "active"
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
@@ -255,7 +268,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `reviewModel   : ${c.reviewModel ?? T("(classifierModel と同じ経路 / 共有フォールバック)", "(same path as classifierModel / shared fallback)")}`,
     `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・トポロジー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
     `topology      : ${c.topologyMode === "fixed" ? T("fixed / single 固定", "fixed / always single") : T(`auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`, `auto / ${(c.allowedTopologies ?? []).join(", ")} / aux call limit ${c.maxTopologyCalls ?? 4}`)}`,
-    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"}`,
+    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,

@@ -296,6 +296,51 @@ check("agentic null: ops falls back to intelligence", mapped["openrouter/acme/no
 check("agentic null: review = intelligence", mapped["openrouter/acme/no-agentic"].review, 0.1);
 check("out-of-range clipped", buildBenchmarkModels([{ id: "x/clip", ...aaOf(150, -20, 50) }])["openrouter/x/clip"].overall, 1);
 
+// --- Attempt-aware rescue counter (mirror of noteAttemptFailure / attemptGateOpen) ---
+// Same failed attempt observed via http.response AND session.step.failed within
+// ATTEMPT_DEDUPE_MS counts once; genuine consecutive failures accumulate; the
+// window resets a stale counter.
+const ATTEMPT_WINDOW_MS = 10 * 60_000;
+const ATTEMPT_DEDUPE_MS = 15_000;
+const attemptFailures = new Map();
+const attemptKey = (sid, ref) => `${sid}\n${ref}`;
+const clock = { now: 1_000_000_000 };
+const peekAttemptFailures = (sid, ref, now = clock.now) => {
+  const entry = attemptFailures.get(attemptKey(sid, ref));
+  if (!entry || now - entry.at > ATTEMPT_WINDOW_MS) return 0;
+  return entry.count;
+};
+const noteAttemptFailure = (sid, ref, now = clock.now) => {
+  const key = attemptKey(sid, ref);
+  const entry = attemptFailures.get(key);
+  if (entry && now - entry.at <= ATTEMPT_DEDUPE_MS) return entry.count;
+  if (entry && now - entry.at > ATTEMPT_WINDOW_MS) {
+    attemptFailures.set(key, { count: 1, at: now });
+    return 1;
+  }
+  const count = (entry?.count ?? 0) + 1;
+  attemptFailures.set(key, { count, at: now });
+  return count;
+};
+// one failure, seen through both channels within the dedupe window
+check("attempt 1 via HTTP", noteAttemptFailure("s1", "p/m", clock.now), 1);
+check("same attempt via event deduped", noteAttemptFailure("s1", "p/m", clock.now + 2_000), 1);
+check("attempt 2 counted", noteAttemptFailure("s1", "p/m", clock.now + 20_000), 2);
+check("event dedup of attempt 2", noteAttemptFailure("s1", "p/m", clock.now + 22_000), 2);
+// three distinct failures reach a limit of 3
+check("attempt 3 counted", noteAttemptFailure("s1", "p/m", clock.now + 40_000), 3);
+check("gate open at 3/3", peekAttemptFailures("s1", "p/m") >= 3, true);
+// success resets the budget (markRescueSwitch)
+attemptFailures.delete(attemptKey("s1", "p/m"));
+check("reset clears budget", peekAttemptFailures("s1", "p/m"), 0);
+// window expiry restarts counting
+check("attempt after first failure", noteAttemptFailure("s2", "p/m", clock.now), 1);
+check(
+  "window expiry restarts counting",
+  noteAttemptFailure("s2", "p/m", clock.now + ATTEMPT_WINDOW_MS + 1),
+  1,
+);
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);

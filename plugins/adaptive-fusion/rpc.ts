@@ -97,6 +97,9 @@ export const AdaptiveFusion = Rpc.define({
               topologyExploreRate: { type: "number" },
               // v1.1: Bayesian prior strength (pseudo-observations, 1..20)
               topologyPriorStrength: { type: "number" },
+              // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
+              // failures before the session is moved to a healthy model.
+              rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -154,6 +157,9 @@ export const AdaptiveFusion = Rpc.define({
               topologyExploreRate: { type: "number" },
               // v1.1: Bayesian prior strength (pseudo-observations, 1..20)
               topologyPriorStrength: { type: "number" },
+              // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
+              // failures before the session is moved to a healthy model.
+              rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -200,6 +206,7 @@ export const AdaptiveFusion = Rpc.define({
               "topologyWeightAuto",
               "topologyExploreRate",
               "topologyPriorStrength",
+              "rescueAttemptsBeforeSwitch",
               "chainMode",
               "tierMode",
               "tiers",
