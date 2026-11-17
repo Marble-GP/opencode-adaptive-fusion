@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v1.0 (in development)
+## [1.0.0] - 2026-11-17
 
 ### Added
 - **Audit auto-review in routing scores (`autoReviewWeight`)**: the independent
@@ -39,6 +39,12 @@
   requires an exact `OK` reply; any other non-empty answer is treated as a
   failure, because a model that cannot follow a trivial instruction is not
   evidence of recovery.
+- **Startup race (`rpc.unavailable`)**: TUI RPC calls now retry briefly while
+  the server-side plugin finishes loading, so commands run immediately after a
+  restart no longer fail with "RPC unavailable".
+- **RPC schema**: the `config` output now declares `classifierModel` as
+  `string | null`, matching what the server stores when no classifier model is
+  configured.
 
 ### Changed
 - README: routing score section documents the three quality sources and their

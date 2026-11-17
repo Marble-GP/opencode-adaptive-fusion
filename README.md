@@ -61,7 +61,7 @@ Install the plugin straight from this repository (the repository root is the
 plugin package; its `package.json` maps `exports` into `plugins/adaptive-fusion/`):
 
 ```bash
-opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v0.9.1'
+opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.0.0'
 ```
 
 OpenCode installs it into the **global** plugin configuration. Verify and manage it with:
@@ -72,7 +72,7 @@ opencode plugin update opencode-adaptive-fusion
 opencode plugin remove  opencode-adaptive-fusion
 ```
 
-Exact tags such as `v0.9.1` stay pinned to that tag; omit the `#…` suffix to track the
+Exact tags such as `v1.0.0` stay pinned to that tag; omit the `#…` suffix to track the
 default branch, and use `opencode plugin update` to jump forward. Restart OpenCode
 after installing (TUI parts load at startup).
 
@@ -595,7 +595,7 @@ automatically — but never silently:
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
-| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, benchmark library auto-refresh (toggle-ON, daily) | **In development** |
+| **v1.0** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, `/fusion-weights` editor, benchmark library auto-refresh | **Released** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation | Planned |
 | v1.0+ | test harness, comparative experiments | Planned |
