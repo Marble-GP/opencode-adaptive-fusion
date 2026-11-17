@@ -219,7 +219,37 @@ const formatConfig = (c: FusionConfig, en = false): string => {
 export default Plugin.define({
   id: "adaptive-fusion.tui",
   setup(context) {
-    const fusion = context.client.rpc(AdaptiveFusion)
+    // RPC client with a startup-race guard. The server loads plugins in the
+    // background, so a command run right after a restart can hit
+    // "rpc.unavailable" before the server part registers its RPC. Retry
+    // briefly (up to ~3 s) for that case only; other errors surface as-is.
+    const fusionClient = context.client.rpc(AdaptiveFusion)
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms))
+    const fusionReady = async <R>(call: () => Promise<R>): Promise<R> => {
+      let lastError: unknown
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          return await call()
+        } catch (error) {
+          lastError = error
+          const text = `${(error as { message?: string })?.message ?? error}`
+          if (!text.includes("rpc.unavailable")) throw error
+          await sleep(400)
+        }
+      }
+      throw lastError
+    }
+    const fusion = new Proxy(fusionClient, {
+      get(target, prop, receiver) {
+        const original = Reflect.get(target, prop, receiver) as unknown
+        if (typeof original !== "function") return original
+        return (...callArgs: unknown[]) =>
+          fusionReady(() =>
+            (original as (...a: unknown[]) => unknown).apply(target, callArgs),
+          )
+      },
+    }) as typeof fusionClient
     // RPC is registered per location scope, so the current TUI location must be
     // passed explicitly (if omitted, it falls back to the server working directory
     // and would reference an unregistered location, causing rpc.unavailable).
