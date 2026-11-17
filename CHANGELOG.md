@@ -14,10 +14,11 @@
   instead of output price alone.
 - **`/fusion-weights`**: batch-adjust the routing/topology weights that were
   previously only reachable through `opencode.json` options — five presets
-  (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`) plus a
-  `key=value` batch editor for all eleven tunables (`cost`, `latency`,
-  `explore`, `learning`, `minobs`, `bench`, `audit`, `topojev`, `topocp`,
-  `topoauto`, `topocalls`), with range validation.
+  (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`), a
+  combobox-style editor (searchable field list, each value edited in a
+  prefilled prompt), and a `key=value` batch editor for all eleven tunables
+  (`cost`, `latency`, `explore`, `learning`, `minobs`, `bench`, `audit`,
+  `topojev`, `topocp`, `topoauto`, `topocalls`), with range validation.
 
 ### Fixed
 - **Probe strictness**: the recovery probe (`Reply with exactly: OK`) now

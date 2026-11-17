@@ -754,15 +754,22 @@ export default Plugin.define({
                   },
                   {
                     title: tr(
-                      "カスタム: key=value を一括編集",
-                      "custom: batch-edit key=value pairs",
+                      "コンボボックス: 係数を1つずつ選んで編集",
+                      "combobox: pick one coefficient at a time and edit it",
+                    ),
+                    value: "field",
+                  },
+                  {
+                    title: tr(
+                      "一括: key=value をまとめて編集",
+                      "batch: edit key=value pairs at once",
                     ),
                     value: "custom",
                   },
                 ],
               })
               if (!choice) return
-              if (choice !== "custom") {
+              if (choice !== "custom" && choice !== "field") {
                 const update = WEIGHT_PRESETS[choice]
                 const result = await fusion.config(
                   { update },
@@ -778,7 +785,65 @@ export default Plugin.define({
                 )
                 return
               }
-              // Custom: one batch prompt with key=value pairs
+              // Combobox-style editing (v1.0): a single native combobox widget
+              // is not available in the dialog API, so compose searchable
+              // select (type-to-filter field list with current values) with a
+              // prompt prefilled with the current value per field. Editing
+              // loops back to the list; Esc finishes.
+              if (choice === "field") {
+                let cur: FusionConfig = c
+                for (;;) {
+                  const picked = await context.ui.dialog.select({
+                    title: tr(
+                      "編集する係数を選択(Esc で終了)",
+                      "Pick a coefficient to edit (Esc to finish)",
+                    ),
+                    options: WEIGHT_FIELDS.map((f) => ({
+                      title: `${f.alias} = ${(cur as any)[f.server] ?? "-"}`,
+                      value: f.alias,
+                    })),
+                    search: (query, options) =>
+                      options.filter((o) =>
+                        o.title.toLowerCase().includes(query.toLowerCase()),
+                      ),
+                  })
+                  if (!picked) break
+                  const field = WEIGHT_FIELDS.find((f) => f.alias === picked)
+                  if (!field) break
+                  const input = await context.ui.dialog.prompt({
+                    title: `adaptive-fusion weights: ${field.alias}`,
+                    placeholder: tr(
+                      `${field.min}〜${field.max}${field.integer ? "(整数)" : ""}`,
+                      `${field.min}..${field.max}${field.integer ? " (integer)" : ""}`,
+                    ),
+                    default: String((cur as any)[field.server] ?? ""),
+                  })
+                  if (input === undefined) continue
+                  const num = Number(input.trim())
+                  if (!Number.isFinite(num) || num < field.min || num > field.max) {
+                    context.ui.toast.show({
+                      message: tr(
+                        `${field.alias} は ${field.min}〜${field.max} の数値で入力してください`,
+                        `${field.alias} must be a number from ${field.min} to ${field.max}`,
+                      ),
+                      variant: "error",
+                    })
+                    continue
+                  }
+                  const value = field.integer ? Math.floor(num) : num
+                  const result = await fusion.config(
+                    { update: { [field.server]: value } },
+                    { location: location() },
+                  )
+                  cur = result.config
+                  context.ui.toast.show({
+                    message: `weights: ${field.alias} = ${value}`,
+                    variant: "success",
+                  })
+                }
+                return
+              }
+              // Batch: one prompt with key=value pairs
               const currentText = [
                 `cost=${c.costWeight ?? "-"}`,
                 `latency=${c.latencyWeight ?? "-"}`,
