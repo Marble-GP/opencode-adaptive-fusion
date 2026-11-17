@@ -226,7 +226,9 @@ export default Plugin.define({
     const fusionClient = context.client.rpc(AdaptiveFusion)
     const sleep = (ms: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, ms))
-    const fusionReady = async <R>(call: () => Promise<R>): Promise<R> => {
+    // Declared as a function statement: generic arrow functions in .tsx are
+    // ambiguous with JSX and fail to parse.
+    async function fusionReady<R>(call: () => Promise<R>): Promise<R> {
       let lastError: unknown
       for (let attempt = 0; attempt < 6; attempt++) {
         try {
