@@ -77,7 +77,8 @@ export const AdaptiveFusion = Rpc.define({
               minObservations: { type: "number" },
               costWeight: { type: "number" },
               latencyWeight: { type: "number" },
-              classifierModel: { type: "string" },
+              // Server stores null when unset (TUI tolerates both).
+              classifierModel: { type: ["string", "null"] },
               kinds: { type: "array", items: { type: "string" } },
               models: { type: "array", items: { type: "string" } },
               maxInputCost: { type: "number" },
@@ -127,7 +128,8 @@ export const AdaptiveFusion = Rpc.define({
               minObservations: { type: "number" },
               costWeight: { type: "number" },
               latencyWeight: { type: "number" },
-              classifierModel: { type: "string" },
+              // Server stores null when unset (TUI tolerates both).
+              classifierModel: { type: ["string", "null"] },
               kinds: { type: "array", items: { type: "string" } },
               models: { type: "array", items: { type: "string" } },
               maxInputCost: { type: "number" },
