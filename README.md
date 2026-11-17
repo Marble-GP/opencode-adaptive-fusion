@@ -431,7 +431,8 @@ Turn: in 203 → out 513 tok
   session is **automatically restored** to it on a later prompt (24 h restore window).
 - **Verified cooldown:** the 1-hour quota timer expiring does *not* mean recovery.
   A minimal live probe (`Reply with exactly: OK`) must return exactly `OK`
-  before the cooldown is lifted (`needsVerify`). A failed probe extends the
+  (case-insensitive, optional trailing punctuation) before the cooldown is
+  lifted (`needsVerify`). A failed probe extends the
   cooldown by another hour. Verified lifts are logged as `VERIFY ok/fail`;
   successes that clear a cooldown are logged as `RECOVER ok`. A probe that
   returns anything else (even a long free-form answer) is treated as a

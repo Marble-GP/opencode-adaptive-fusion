@@ -977,14 +977,15 @@ export default Plugin.define({
             ),
           ])
           const text = String(result?.text ?? "").trim()
-          if (text === "OK") {
+          // Accept exactly "OK" (case-insensitive, optional trailing punctuation).
+          // Verbose answers mean the model cannot follow a trivial instruction.
+          const ok = /^ok[.!]?$/i.test(text)
+          if (ok) {
             // Verify success: proof the limit actually lifted, so clear the cooldown
             clearCooldown(ref)
             logRoute(`VERIFY ok ${ref} (cooldown cleared)`)
           } else {
-            // Anything other than an exact OK (empty, verbose, refusal) is not
-            // evidence of recovery: a model that cannot follow a trivial
-            // instruction stays cooled down.
+            // Anything else is not evidence of recovery: keep it cooled down.
             entry.until = Date.now() + QUOTA_COOLDOWN_MS
             logRoute(
               text.length === 0
@@ -3535,7 +3536,9 @@ export default Plugin.define({
         ])
         const ms = performance.now() - started
         const text = String(result?.text ?? "").trim()
-        const ok = text === "OK"
+        // Same acceptance rule as the VERIFY probe: exactly "OK"
+        // (case-insensitive, optional trailing punctuation).
+        const ok = /^ok[.!]?$/i.test(text)
         return {
           model,
           ok,

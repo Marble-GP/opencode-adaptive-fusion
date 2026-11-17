@@ -116,11 +116,18 @@ check(
 check("missing tier -> Infinity", routingCostOf({}), Infinity);
 check("missing cache -> input+output only", routingCostOf({ cost: [{ input: 0.5, output: 2 }] }), 2.5);
 
-// Probe strictness (documented behavior of VERIFY/probeOne)
-const probeOk = (text) => String(text ?? "").trim() === "OK";
+// Probe strictness (documented behavior of VERIFY/probeOne):
+// the reply must be exactly "OK" — case-insensitive, optional trailing
+// punctuation, surrounding whitespace ignored. Anything else (verbose
+// answers, refusals, empty) is a failure.
+const probeOk = (text) => /^ok[.!]?$/i.test(String(text ?? "").trim());
 check("probe accepts exact OK", probeOk("OK"), true);
+check("probe accepts lowercase ok", probeOk("ok"), true);
+check("probe accepts OK with period", probeOk("OK."), true);
 check("probe accepts padded OK", probeOk("  OK  "), true);
-check("probe rejects verbose answer", probeOk("OK, here is what I found..."), false);
+check("probe rejects verbose prefix", probeOk("OK, here is what I found..."), false);
+check("probe rejects prose", probeOk("Certainly! The answer is OK"), false);
+check("probe rejects okay", probeOk("okay"), false);
 check("probe rejects empty", probeOk(""), false);
 check("probe rejects undefined", probeOk(undefined), false);
 
