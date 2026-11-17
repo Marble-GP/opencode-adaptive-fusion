@@ -95,6 +95,8 @@ export const AdaptiveFusion = Rpc.define({
               topologyWeightAuto: { type: "number" },
               // v1.1: probability of adopting a non-greedy topology at selection time
               topologyExploreRate: { type: "number" },
+              // v1.1: Bayesian prior strength (pseudo-observations, 1..20)
+              topologyPriorStrength: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -150,6 +152,8 @@ export const AdaptiveFusion = Rpc.define({
               topologyWeightAuto: { type: "number" },
               // v1.1: probability of adopting a non-greedy topology at selection time
               topologyExploreRate: { type: "number" },
+              // v1.1: Bayesian prior strength (pseudo-observations, 1..20)
+              topologyPriorStrength: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -195,6 +199,7 @@ export const AdaptiveFusion = Rpc.define({
               "topologyWeightHumanCP",
               "topologyWeightAuto",
               "topologyExploreRate",
+              "topologyPriorStrength",
               "chainMode",
               "tierMode",
               "tiers",
@@ -237,6 +242,8 @@ export const AdaptiveFusion = Rpc.define({
           sessionID: { type: "string" },
           // v0.9.0: review target turn (0 = latest, 1 = one before, ...). Defaults to 0.
           offset: { type: "number" },
+          // v1.1: optional preview of the Bayesian topology distribution for a category.
+          category: { type: "string" },
         },
         required: ["sessionID"],
         additionalProperties: false,
@@ -296,6 +303,17 @@ export const AdaptiveFusion = Rpc.define({
           topologyOkRate: { type: "number" },
           topologyAvgMs: { type: "number" },
           topologyQualityAverage: { type: "number" },
+          // v1.1: Bayesian topology reward distribution preview (optional, not in required)
+          topologyRewards: {
+            type: "object",
+            properties: {
+              distribution: {
+                type: "object",
+                additionalProperties: { type: "number" },
+              },
+            },
+            additionalProperties: false,
+          },
           // Execution plan injected via sequential-chain (only when present; optional, so not in required)
           chainPlan: { type: "string" },
           // Tier routing (v0.8) load band (only when present)

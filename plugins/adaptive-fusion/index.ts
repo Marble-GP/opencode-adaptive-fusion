@@ -340,6 +340,7 @@ export default Plugin.define({
           : "",
       benchAutoUpdate: ctx.options.benchAutoUpdate !== false,
       topologyExploreRate: clamp(num(ctx.options.topologyExploreRate, 0.1), 0, 1),
+      topologyPriorStrength: Math.max(1, Math.min(20, Math.floor(num(ctx.options.topologyPriorStrength, 4)))),
       classifierModel:
         typeof ctx.options.classifierModel === "string" &&
         ctx.options.classifierModel.includes("/")
@@ -453,6 +454,8 @@ export default Plugin.define({
       }
       if (typeof s.topologyExploreRate === "number")
         cfg.topologyExploreRate = clamp(s.topologyExploreRate, 0, 1)
+      if (typeof s.topologyPriorStrength === "number")
+        cfg.topologyPriorStrength = Math.max(1, Math.min(20, Math.floor(s.topologyPriorStrength)))
       if (typeof s.topologyWeightJev === "number")
         cfg.topologyWeightJev = clamp(s.topologyWeightJev, 0, 1)
       if (typeof s.topologyWeightHumanCP === "number")
@@ -1746,7 +1749,8 @@ export default Plugin.define({
       return (wJev * prior + wCP * cp + wAuto * auto) / total
     }
     // Summary of per-category topology track record (passed to Jev's state).
-    // Example: "coding: single 12x (ok 83%, quality 4.1), router 5x (ok 60%, quality 3.2)"
+    // Includes ALL allowed topologies with explicit "no data" for shapes with zero observations.
+    // Example: "coding: single 12x (ok 83%, quality 4.1), router 5x (ok 60%, quality 3.2), sequential-chain: no data"
     const topologyStatsSummary = async (
       category: string | undefined,
     ): Promise<string> => {
@@ -1755,17 +1759,20 @@ export default Plugin.define({
       for (const topology of cfg.allowedTopologies) {
         const key = `${TASK_TOPOLOGY_PREFIX}${category}/${topology}`
         const stat = await loadTopologyStat(key)
-        if (!stat || stat.count <= 0) continue
-        const okPct = Math.round((stat.ok / stat.count) * 100)
-        const quality =
-          stat.qualityCount > 0
-            ? (stat.sumQuality / stat.qualityCount).toFixed(1)
-            : "n/a"
-        parts.push(
-          `${topology}: ${stat.count}件 (ok ${okPct}%, quality ${quality})`,
-        )
+        if (stat && stat.count > 0) {
+          const okPct = Math.round((stat.ok / stat.count) * 100)
+          const quality =
+            stat.qualityCount > 0
+              ? (stat.sumQuality / stat.qualityCount).toFixed(1)
+              : "n/a"
+          parts.push(
+            `${topology}: ${stat.count}件 (ok ${okPct}%, quality ${quality})`,
+          )
+        } else {
+          parts.push(`${topology}: no data`)
+        }
       }
-      return parts.length > 0 ? parts.join(", ") : "(no prior stats for this category)"
+      return parts.join(", ")
     }
 
     // Deterministic topology prior from the task shape (load band + category).
@@ -1811,31 +1818,64 @@ export default Plugin.define({
       for (const [k, v] of Object.entries(weights)) out[k] = v / total
       return out
     }
-    // Task-shape prior blended with the observed track record (D-4).
-    // Per allowed topology:
-    //   - base weight from heuristicTopologyWeights
-    //   - if the category has >= 3 observations of this topology, multiply by
-    //     (0.5 + D-4 score), so a well-rated past shape wins and a bad one loses.
-    // Returns normalized probabilities.
-    const taskTopologyPrior = async (
+    // Bayesian reward for a topology given its track record.
+    //   auto component: Beta-style posterior mean of (shadow-review quality
+    //     normalized to 0..1), falling back to the ok rate when no quality
+    //     samples exist yet. With no data at all it returns the prior mean,
+    //     so an untested shape is never preferred or penalized by data — it
+    //     simply inherits the heuristic prior.
+    //   cp component: Beta smoothing of the human cost-performance mean
+    //     (0..1), neutral 0.5 when unrated.
+    //   Final: weighted sum with wAuto / wCP (Jev enters separately as the
+    //   blend term in selectTopology, not here).
+    // TOPO_PRIOR_STRENGTH is now configurable via cfg.topologyPriorStrength
+    // (default 4, pseudo-observations). Larger = stronger anchoring to the
+    // task-shape prior; smaller = track record decides faster.
+    const topologyReward = (
+      stat: TopologyStat | undefined,
+      priorMean: number,
+    ): number => {
+      const pm = clamp(priorMean, 0, 1)
+      const strength = clamp(cfg.topologyPriorStrength ?? 4, 1, 20)
+      const a0 = 1 + strength * pm
+      const b0 = 1 + strength * (1 - pm)
+      const auto =
+        stat && stat.qualityCount > 0
+          ? (stat.sumQuality / 5 + a0) / (stat.qualityCount + a0 + b0)
+          : stat && stat.count > 0
+            ? (stat.ok + a0) / (stat.count + a0 + b0)
+            : pm
+      const cp =
+        stat && stat.costPerformanceCount > 0
+          ? (stat.sumCostPerformance / 5 + a0) /
+            (stat.costPerformanceCount + a0 + b0)
+          : 0.5
+      const wAuto = cfg.topologyWeightAuto
+      const wCP = cfg.topologyWeightHumanCP
+      const total = wAuto + wCP
+      if (total <= 0) return auto
+      return (wAuto * auto + wCP * cp) / total
+    }
+    // Bayesian topology distribution: for every allowed topology the reward
+    // above is computed (prior from the load band + category, track record
+    // from fusion/topology/task/*) and normalized to probabilities.
+    const bayesianTopologyDistribution = async (
       category: string | undefined,
       load: TierName | undefined,
     ): Promise<Record<string, number>> => {
-      const weights = heuristicTopologyWeights(load, category)
-      const out: Record<string, number> = {}
+      const prior = normalizeTopologyWeights(heuristicTopologyWeights(load, category))
+      const rewards: Record<string, number> = {}
       for (const topology of cfg.allowedTopologies) {
         if (!(topology in TOPOLOGY_CATALOG)) continue
-        let base = weights[topology] ?? 0.01
+        let stat: TopologyStat | undefined
         if (category) {
-          const stat = await loadTopologyStat(
+          stat = await loadTopologyStat(
             `${TASK_TOPOLOGY_PREFIX}${category}/${topology}`,
           )
-          if (stat && stat.count >= 3)
-            base *= 0.5 + topologyScore(stat, false)
         }
-        out[topology] = base
+        rewards[topology] = topologyReward(stat, prior[topology] ?? 0.01)
       }
-      return normalizeTopologyWeights(out)
+      return normalizeTopologyWeights(rewards)
     }
     // Probability distribution from a Jev Choice answer restricted to the
     // allowed topologies. Falls back to one-hot on the chosen choice (or a
@@ -1907,14 +1947,19 @@ export default Plugin.define({
       const allowed = cfg.allowedTopologies.filter((t) => t in TOPOLOGY_CATALOG)
       if (allowed.length <= 1)
         return { topology: resolveTopology(allowed[0]), trace: "only one allowed" }
-      const heuristic = await taskTopologyPrior(category, load)
+      const heuristic = await bayesianTopologyDistribution(category, load)
       const combined =
         jevProb !== undefined
           ? blendTopologyDistributions(heuristic, jevProb, cfg.topologyWeightJev)
           : heuristic
-      // bestTopologyOf already skips sequential-chain when the aux-call
-      // budget is insufficient, so no extra guard is needed here.
-      const greedy = bestTopologyOf(combined)
+      // If the blended argmax lands on sequential-chain but the auxiliary-call
+      // budget is insufficient, take the next best.
+      let greedy = bestTopologyOf(combined)
+      if (greedy === "sequential-chain" && cfg.maxTopologyCalls < 2) {
+        const rest = { ...combined }
+        delete rest["sequential-chain"]
+        greedy = bestTopologyOf(rest)
+      }
       const explore =
         Math.random() < clamp(cfg.topologyExploreRate, 0, 1)
           ? exploreTopology(greedy, allowed)
@@ -1972,7 +2017,7 @@ export default Plugin.define({
             topology: {
               type: "choice",
               instructions:
-                "Choose the orchestration topology for this task. Prefer the simplest topology that suffices. Use the category and past performance stats to decide.",
+                "Choose the orchestration topology for this task. Use the category and past performance stats to decide. Prioritize accuracy and cost-effectiveness based on load and historical performance.",
               criteria: Object.fromEntries(
                 allowed.map((t) => [t, TOPOLOGY_CATALOG[t]]),
               ),
@@ -4529,6 +4574,7 @@ export default Plugin.define({
       if (typeof update.maxTopologyCalls === "number") cfg.maxTopologyCalls = clamp(Math.floor(update.maxTopologyCalls), 1, 16)
       if (typeof update.topologyWeightJev === "number") cfg.topologyWeightJev = clamp(update.topologyWeightJev, 0, 1)
       if (typeof update.topologyExploreRate === "number") cfg.topologyExploreRate = clamp(update.topologyExploreRate, 0, 1)
+      if (typeof update.topologyPriorStrength === "number") cfg.topologyPriorStrength = Math.max(1, Math.min(20, Math.floor(update.topologyPriorStrength)))
       if (typeof update.topologyWeightHumanCP === "number") cfg.topologyWeightHumanCP = clamp(update.topologyWeightHumanCP, 0, 1)
       if (typeof update.topologyWeightAuto === "number") cfg.topologyWeightAuto = clamp(update.topologyWeightAuto, 0, 1)
       if (update.chainMode === "active" || update.chainMode === "off") cfg.chainMode = update.chainMode
@@ -4608,12 +4654,22 @@ export default Plugin.define({
         // キー自体は絶対に返さない。利用可否だけを返す
         return { available: jevAvailable() }
       },
-      reviewInfo: async (input) => ({
-        ...await reviewSnapshot(
+      reviewInfo: async (input) => {
+        const snapshot = await reviewSnapshot(
           String((input as any)?.sessionID ?? ""),
           normalizeOffset((input as any)?.offset),
-        ),
-      }),
+        )
+        const reqCategory = (input as any)?.category
+        const reqSession = (input as any)?.sessionID
+        const dist = await bayesianTopologyDistribution(
+          typeof reqCategory === "string" ? reqCategory : undefined,
+          sessionLoad.get(String(reqSession ?? "")),
+        )
+        return {
+          ...snapshot,
+          topologyRewards: { distribution: dist },
+        }
+      },
       reviewSummary: async (input) => ({
         text: await reviewSummary(
           String((input as any)?.sessionID ?? ""),

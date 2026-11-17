@@ -211,6 +211,34 @@ check(
   JSON.stringify(jevTopologyDistribution({}, "sequential-chain", allowedThree)),
   JSON.stringify({ single: 0, router: 0, "sequential-chain": 1 }),
 );
+// --- Bayesian topology reward (mirror of topologyReward / bayesianTopologyDistribution) ---
+const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const topologyReward = (stat, priorMean, strength = 4, wAuto = 0.25, wCP = 0.25) => {
+  const pm = clampN(priorMean, 0, 1);
+  const a0 = 1 + strength * pm;
+  const b0 = 1 + strength * (1 - pm);
+  const auto =
+    stat && stat.qualityCount > 0
+      ? (stat.sumQuality / 5 + a0) / (stat.qualityCount + a0 + b0)
+      : stat && stat.count > 0
+        ? (stat.ok + a0) / (stat.count + a0 + b0)
+        : pm;
+  const cp =
+    stat && stat.costPerformanceCount > 0
+      ? (stat.sumCostPerformance / 5 + a0) / (stat.costPerformanceCount + a0 + b0)
+      : 0.5;
+  const total = wAuto + wCP;
+  if (total <= 0) return auto;
+  return (wAuto * auto + wCP * cp) / total;
+};
+check("reward no data returns prior mean", topologyReward(undefined, 0.6), 0.55, 1e-9);
+check("reward quality 4/5 no data inherits prior", topologyReward({ qualityCount: 0, count: 0, ok: 0, sumQuality: 0 }, 0.6), 0.55, 1e-9);
+// strength 4, prior 0.5: a0=b0=3, quality 4/5=0.8, 1 sample -> auto=(0.8+3)/7≈0.543, cp=0.5, reward=(0.25*0.543+0.25*0.5)/0.5≈0.5214
+check("reward one quality sample pulls toward data", topologyReward({ qualityCount: 1, sumQuality: 4, count: 1, ok: 1 }, 0.5), 0.5214285714285714, 1e-9);
+// higher strength anchors more to prior: strength 20, prior 0.9, 1 quality 0.2 sample stays close to 0.9
+const rLowPrior = topologyReward({ qualityCount: 1, sumQuality: 1, count: 1, ok: 0 }, 0.9, 4);
+const rHighPrior = topologyReward({ qualityCount: 1, sumQuality: 1, count: 1, ok: 0 }, 0.9, 20);
+check("higher strength anchors to prior (higher reward)", rHighPrior > rLowPrior, true);
 
 // Benchmark auto-refresh mapping (mirror of index.ts buildBenchmarkModels).
 // OpenRouter payload: benchmarks.artificial_analysis indices (0..100) are
