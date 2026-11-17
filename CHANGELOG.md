@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] — v1.1.0 (in development)
+
+### Added
+- **Task-shape topology prior (v1.1)**: topology selection no longer relies on
+  Jev alone (or on a track record that could never accumulate for non-single
+  shapes). A deterministic prior built from the load band (light/middle/heavy)
+  and the category nudges heavy or analytically shaped tasks (`research` /
+  `coding` / `writing` / `debugging`) toward `sequential-chain` and
+  `review` / `ops` toward `single`. The prior is multiplied by `(0.5 + D-4
+  score)` when ≥ 3 observations exist for the category, then normalized.
+- **Jev blend**: with a Jev key, its Choice distribution is blended with the
+  prior — `(1 - topologyWeightJev) × heuristic + topologyWeightJev × Jev`
+  (default 0.5/0.5) instead of the confidence-threshold fallback to single.
+- **`topologyExploreRate` (default 0.1)**: ε-greedy exploration — with this
+  probability a non-greedy allowed topology is adopted, so non-single shapes
+  can accumulate track records. Configurable via plugin options, the config
+  RPC, and `/fusion-weights` (`topoexplore`).
+
+### Changed
+- Topology selection logs now carry the blended distribution and the selection
+  trace (`heuristic` / `blend` / `explore`) in `/fusion-stats`'s route log
+  instead of only `TOPOLOGY single`.
+
 ## [1.0.0] - 2026-11-17
 
 ### Added

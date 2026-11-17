@@ -218,9 +218,13 @@ type FusionConfig = {
   maxTopologyCalls: number
   // Whitelist of topologies allowed to run (tied to the staged rollout)
   allowedTopologies: string[]
+  // ε probability of adopting a non-greedy allowed topology at selection time
+  // (tracks the cold-start problem of never-chosen shapes). Default 0.1.
+  topologyExploreRate: number
   // Weights of the topology selection score (v0.7a/D-4).
   //   score = w1 x Jev prior probability + w2 x human cost-performance + w3 x automatic observation (quality/ok rate)
   // Without a Jev key, w1 is treated as 0 automatically and selection uses w2/w3 only.
+  // topologyWeightJev also sets the Jev share of the blended selection distribution (v1.1).
   topologyWeightJev: number
   topologyWeightHumanCP: number
   topologyWeightAuto: number
@@ -335,6 +339,7 @@ export default Plugin.define({
           ? ctx.options.benchmarksFile
           : "",
       benchAutoUpdate: ctx.options.benchAutoUpdate !== false,
+      topologyExploreRate: clamp(num(ctx.options.topologyExploreRate, 0.1), 0, 1),
       classifierModel:
         typeof ctx.options.classifierModel === "string" &&
         ctx.options.classifierModel.includes("/")
@@ -446,6 +451,8 @@ export default Plugin.define({
         if (filtered.length > 0) cfg.allowedTopologies = filtered
         else cfg.allowedTopologies = ["single"]
       }
+      if (typeof s.topologyExploreRate === "number")
+        cfg.topologyExploreRate = clamp(s.topologyExploreRate, 0, 1)
       if (typeof s.topologyWeightJev === "number")
         cfg.topologyWeightJev = clamp(s.topologyWeightJev, 0, 1)
       if (typeof s.topologyWeightHumanCP === "number")
@@ -1761,34 +1768,164 @@ export default Plugin.define({
       return parts.length > 0 ? parts.join(", ") : "(no prior stats for this category)"
     }
 
-    // Track-record-based heuristic (when Jev is unavailable).
-    // Pick the best-rated among per-category shape records with 3+ entries.
-    // No records / not rateable -> single (legacy behavior).
-    // "Rating" is the inner-review score average. If no quality samples exist, the ok rate is used.
-    const heuristicTopology = async (
+    // Deterministic topology prior from the task shape (load band + category).
+    // Weights favor single by construction; heavy/analytical tasks shift mass
+    // onto sequential-chain. Renormalized into probabilities by the caller.
+    // Category multipliers reflect where multi-step shapes historically pay off:
+    //   research/coding/writing/debugging -> chain-boost, review/ops -> single-boost.
+    const heuristicTopologyWeights = (
+      load: TierName | undefined,
       category: string | undefined,
-      useJevPrior = false,
-    ): Promise<string> => {
-      if (cfg.topologyMode === "fixed") return "single"
-      if (!category) return "single"
-      let best: { topology: string; score: number } | undefined
-      let anyQualified = false
+    ): Record<string, number> => {
+      let single: number
+      let chain: number
+      let router: number
+      if (load === "light") {
+        single = 0.85; chain = 0.03; router = 0.02
+      } else if (load === "middle") {
+        single = 0.6; chain = 0.14; router = 0.04
+      } else if (load === "heavy") {
+        single = 0.3; chain = 0.52; router = 0.08
+      } else {
+        // No load estimate: keep single dominant, chain merely visible
+        single = 0.6; chain = 0.1; router = 0.04
+      }
+      const cat = category ?? ""
+      if (cat === "research") { chain *= 1.6; router *= 2.0 }
+      else if (cat === "coding") chain *= 1.4
+      else if (cat === "writing") chain *= 1.3
+      else if (cat === "debugging") chain *= 1.2
+      else if (cat === "review") { chain *= 0.7; single *= 1.2; router *= 1.5 }
+      else if (cat === "ops") { chain *= 0.5; single *= 1.3 }
+      return { single, router, "sequential-chain": chain }
+    }
+    // Normalize a weight map into probabilities (sums to 1). Keys absent
+    // from the map are dropped; empty map normalizes to single.
+    const normalizeTopologyWeights = (
+      weights: Record<string, number>,
+    ): Record<string, number> => {
+      let total = 0
+      for (const v of Object.values(weights)) total += v
+      if (total <= 0) return { single: 1 }
+      const out: Record<string, number> = {}
+      for (const [k, v] of Object.entries(weights)) out[k] = v / total
+      return out
+    }
+    // Task-shape prior blended with the observed track record (D-4).
+    // Per allowed topology:
+    //   - base weight from heuristicTopologyWeights
+    //   - if the category has >= 3 observations of this topology, multiply by
+    //     (0.5 + D-4 score), so a well-rated past shape wins and a bad one loses.
+    // Returns normalized probabilities.
+    const taskTopologyPrior = async (
+      category: string | undefined,
+      load: TierName | undefined,
+    ): Promise<Record<string, number>> => {
+      const weights = heuristicTopologyWeights(load, category)
+      const out: Record<string, number> = {}
       for (const topology of cfg.allowedTopologies) {
-        const key = `${TASK_TOPOLOGY_PREFIX}${category}/${topology}`
-        const stat = await loadTopologyStat(key)
-        if (!stat || stat.count < 3) continue
-        anyQualified = true
-        // D-4 weighted combination: w1 x Jev prior + w2 x human cost-performance + w3 x automatic observation
-        const score = topologyScore(stat, useJevPrior)
-        if (!best || score > best.score) {
-          best = { topology, score }
+        if (!(topology in TOPOLOGY_CATALOG)) continue
+        let base = weights[topology] ?? 0.01
+        if (category) {
+          const stat = await loadTopologyStat(
+            `${TASK_TOPOLOGY_PREFIX}${category}/${topology}`,
+          )
+          if (stat && stat.count >= 3)
+            base *= 0.5 + topologyScore(stat, false)
+        }
+        out[topology] = base
+      }
+      return normalizeTopologyWeights(out)
+    }
+    // Probability distribution from a Jev Choice answer restricted to the
+    // allowed topologies. Falls back to one-hot on the chosen choice (or a
+    // uniform distribution) when probabilities are missing/garbled.
+    const jevTopologyDistribution = (
+      probabilities: Record<string, number> | undefined,
+      choice: string | undefined,
+    ): Record<string, number> => {
+      const filtered: Record<string, number> = {}
+      for (const t of cfg.allowedTopologies) {
+        if (!(t in TOPOLOGY_CATALOG)) continue
+        const v = probabilities?.[t]
+        if (typeof v === "number" && Number.isFinite(v) && v > 0) filtered[t] = v
+      }
+      if (Object.keys(filtered).length === 0) {
+        for (const t of cfg.allowedTopologies)
+          if (t in TOPOLOGY_CATALOG) filtered[t] = 1
+        if (choice && choice in filtered) {
+          for (const t of Object.keys(filtered)) filtered[t] = t === choice ? 1 : 0
         }
       }
-      if (!anyQualified || !best) return "single"
-      // sequential-chain assumes 1 planner call (verifier is shared with autoReview)
-      if (best.topology === "sequential-chain" && cfg.maxTopologyCalls < 2)
-        return "single"
-      return best.topology
+      return normalizeTopologyWeights(filtered)
+    }
+    // Blend two distributions: (1 - wJev) * heuristic + wJev * jev.
+    const blendTopologyDistributions = (
+      heuristic: Record<string, number>,
+      jev: Record<string, number>,
+      wJev: number,
+    ): Record<string, number> => {
+      const w = clamp(wJev, 0, 1)
+      const out: Record<string, number> = {}
+      for (const t of new Set([...Object.keys(heuristic), ...Object.keys(jev)]))
+        if (t in TOPOLOGY_CATALOG)
+          out[t] = (1 - w) * (heuristic[t] ?? 0) + w * (jev[t] ?? 0)
+      return normalizeTopologyWeights(out)
+    }
+    const bestTopologyOf = (p: Record<string, number>): string => {
+      let best = "single"
+      let bestP = -1
+      for (const [t, v] of Object.entries(p)) {
+        if (t === "sequential-chain" && cfg.maxTopologyCalls < 2) continue
+        if (v > bestP) {
+          bestP = v
+          best = t
+        }
+      }
+      return best
+    }
+    // ε-greedy exploration: with probability cfg.topologyExploreRate pick a
+    // random allowed topology other than the greedy pick (recorded like any
+    // other, so the track record can accumulate for non-single shapes).
+    const exploreTopology = (greedy: string, allowed: string[]): string => {
+      const rest = allowed.filter(
+        (t) => t !== greedy && t in TOPOLOGY_CATALOG &&
+          (t !== "sequential-chain" || cfg.maxTopologyCalls >= 2),
+      )
+      if (rest.length === 0) return greedy
+      return rest[Math.floor(Math.random() * rest.length)]
+    }
+    // Greedy selection using the task-shape prior and (optionally) Jev's
+    // distribution. Returns the chosen topology plus a trace string.
+    // Sequential-chain additionally requires maxTopologyCalls >= 2.
+    const selectTopology = async (
+      category: string | undefined,
+      load: TierName | undefined,
+      jevProb: Record<string, number> | undefined,
+    ): Promise<{ topology: string; trace: string }> => {
+      if (cfg.topologyMode === "fixed") return { topology: "single", trace: "fixed" }
+      const allowed = cfg.allowedTopologies.filter((t) => t in TOPOLOGY_CATALOG)
+      if (allowed.length <= 1)
+        return { topology: resolveTopology(allowed[0]), trace: "only one allowed" }
+      const heuristic = await taskTopologyPrior(category, load)
+      const combined =
+        jevProb !== undefined
+          ? blendTopologyDistributions(heuristic, jevProb, cfg.topologyWeightJev)
+          : heuristic
+      // bestTopologyOf already skips sequential-chain when the aux-call
+      // budget is insufficient, so no extra guard is needed here.
+      const greedy = bestTopologyOf(combined)
+      const explore =
+        Math.random() < clamp(cfg.topologyExploreRate, 0, 1)
+          ? exploreTopology(greedy, allowed)
+          : undefined
+      const topology = explore ?? greedy
+      const mode = explore ? "explore" : jevProb !== undefined ? "blend" : "heuristic"
+      const dist = Object.entries(combined)
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, v]) => `${t}=${v.toFixed(2)}`)
+        .join(" ")
+      return { topology, trace: `${mode}(${dist}${explore ? ` -> explore` : ""})` }
     }
     // Decide the adopted topology from Jev's Choice answer.
     // If confidence < 0.7, fall back to the most conservative single (README §4 policy).
@@ -1803,56 +1940,67 @@ export default Plugin.define({
       return choice
     }
     // Topology selection (pickTopology). Called after the category is settled.
-    //   With Jev: Choice (allowedTopologies only).
-    //     state = { instruction, category, categoryTopologyStats (summary of past records) }
-    //     confidence < 0.7 -> fall back to single
-    //   Without Jev: heuristic (category record with >=3 entries -> best rated / otherwise single)
+    //   Greedy: argmax of the blended distribution
+    //     = (1 - topologyWeightJev) * task-shape prior (load band + category + D-4
+    //       track record) + topologyWeightJev * Jev Choice distribution.
+    //     Jev is used only when a key is present and jevMode=auto; otherwise the
+    //     task-shape prior stands alone.
+    //   Exploration: with probability topologyExploreRate (default 0.1), a random
+    //   non-greedy allowed topology is adopted instead, so non-single shapes can
+    //   accumulate a track record (track record + D-4 scoring then feeds back
+    //   into the prior).
+    //   sequential-chain additionally requires maxTopologyCalls >= 2.
     const pickTopology = async (
       text: string,
       category: string | undefined,
+      load: TierName | undefined,
     ): Promise<string> => {
       if (cfg.topologyMode === "fixed") return "single"
       const allowed = cfg.allowedTopologies.filter((t) => t in TOPOLOGY_CATALOG)
       if (allowed.length <= 1) return resolveTopology(allowed[0])
       const jev = jevClient()
-      if (!jev) return heuristicTopology(category, false)
-      const statsSummary = await topologyStatsSummary(category)
-      const answers = await jev.ask(
-        {
-          instruction: text.slice(0, 1000),
-          category: category ?? "unknown",
-          categoryTopologyStats: statsSummary,
-        },
-        {
-          topology: {
-            type: "choice",
-            instructions:
-              "Choose the orchestration topology for this task. Prefer the simplest topology that suffices. Use the category and past performance stats to decide.",
-            criteria: Object.fromEntries(
-              allowed.map((t) => [t, TOPOLOGY_CATALOG[t]]),
-            ),
+      let jevProb: Record<string, number> | undefined
+      if (jev) {
+        const statsSummary = await topologyStatsSummary(category)
+        const answers = await jev.ask(
+          {
+            instruction: text.slice(0, 1000),
+            category: category ?? "unknown",
+            categoryTopologyStats: statsSummary,
           },
-        },
-      )
-      const answer = answers?.topology
-      if (answer?.type === "choice") {
-        // Record the probability distribution as the topology prior (used for the w1 combination of D-4)
-        await recordTopologyPrior(category, answer.probabilities)
-        if (answer.confidence >= 0.7) {
+          {
+            topology: {
+              type: "choice",
+              instructions:
+                "Choose the orchestration topology for this task. Prefer the simplest topology that suffices. Use the category and past performance stats to decide.",
+              criteria: Object.fromEntries(
+                allowed.map((t) => [t, TOPOLOGY_CATALOG[t]]),
+              ),
+            },
+          },
+        )
+        const answer = answers?.topology
+        if (answer?.type === "choice") {
+          // Record the probability distribution as the topology prior (used for the w1 combination of D-4)
+          await recordTopologyPrior(category, answer.probabilities)
+          jevProb = jevTopologyDistribution(
+            answer.probabilities,
+            answer.choice,
+          )
           logRoute(
             `TOPOLOGY jev ${answer.choice} (conf ${answer.confidence.toFixed(2)})`,
           )
-          return resolveTopology(answer.choice)
+        } else {
+          logRoute("TOPOLOGY jev unavailable -> task-shape prior")
         }
-        logRoute(
-          `TOPOLOGY jev low conf ${answer.confidence.toFixed(2)} -> single`,
-        )
-        return "single"
       }
-      // On Jev failure, fall back to the heuristic (degraded operation).
-      // The key itself is valid, so if a past Jev prior exists, w1 is used.
-      logRoute("TOPOLOGY jev unavailable -> heuristic")
-      return heuristicTopology(category, true)
+      const { topology, trace } = await selectTopology(category, load, jevProb)
+      if (topology !== "single") {
+        logRoute(`TOPOLOGY ${topology} ${trace}`)
+      } else {
+        logRoute(`TOPOLOGY single ${trace}`)
+      }
+      return topology
     }
 
     // ------------------------------------------------------------------
@@ -2401,7 +2549,11 @@ export default Plugin.define({
         )
       }
 
-      const resolvedTopology = await pickTopology(text, category)
+      const resolvedTopology = await pickTopology(
+        text,
+        category,
+        sessionLoad.get(sessionID),
+      )
       sessionTopology.set(sessionID, resolvedTopology)
       if (sessionTopology.size > 200) {
         const oldest = sessionTopology.keys().next().value
@@ -4171,8 +4323,8 @@ export default Plugin.define({
       if (topologyEntries.length > 0) {
         lines.push(
           tr(
-            `(トポロジー選定スコア重み: Jev事前 w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (キー無しのため w1=0 運用)"} / コスパ w2=${cfg.topologyWeightHumanCP} / 自動観測 w3=${cfg.topologyWeightAuto})`,
-            `(topology score weights: Jev prior w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (no key, so w1=0)"} / cost-performance w2=${cfg.topologyWeightHumanCP} / auto observation w3=${cfg.topologyWeightAuto})`,
+            `(トポロジー選定スコア重み: Jev事前 w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (キー無しのため w1=0 運用)"} / コスパ w2=${cfg.topologyWeightHumanCP} / 自動観測 w3=${cfg.topologyWeightAuto} / 探索 ε=${cfg.topologyExploreRate})`,
+            `(topology score weights: Jev prior w1=${cfg.topologyWeightJev}${jevAvailable() ? "" : " (no key, so w1=0)"} / cost-performance w2=${cfg.topologyWeightHumanCP} / auto observation w3=${cfg.topologyWeightAuto} / exploration ε=${cfg.topologyExploreRate})`,
           ),
         )
         lines.push(
@@ -4376,6 +4528,7 @@ export default Plugin.define({
       if (update.topologyMode === "auto" || update.topologyMode === "fixed") cfg.topologyMode = update.topologyMode
       if (typeof update.maxTopologyCalls === "number") cfg.maxTopologyCalls = clamp(Math.floor(update.maxTopologyCalls), 1, 16)
       if (typeof update.topologyWeightJev === "number") cfg.topologyWeightJev = clamp(update.topologyWeightJev, 0, 1)
+      if (typeof update.topologyExploreRate === "number") cfg.topologyExploreRate = clamp(update.topologyExploreRate, 0, 1)
       if (typeof update.topologyWeightHumanCP === "number") cfg.topologyWeightHumanCP = clamp(update.topologyWeightHumanCP, 0, 1)
       if (typeof update.topologyWeightAuto === "number") cfg.topologyWeightAuto = clamp(update.topologyWeightAuto, 0, 1)
       if (update.chainMode === "active" || update.chainMode === "off") cfg.chainMode = update.chainMode

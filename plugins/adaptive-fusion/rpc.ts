@@ -93,6 +93,8 @@ export const AdaptiveFusion = Rpc.define({
               topologyWeightJev: { type: "number" },
               topologyWeightHumanCP: { type: "number" },
               topologyWeightAuto: { type: "number" },
+              // v1.1: probability of adopting a non-greedy topology at selection time
+              topologyExploreRate: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -146,6 +148,8 @@ export const AdaptiveFusion = Rpc.define({
               topologyWeightJev: { type: "number" },
               topologyWeightHumanCP: { type: "number" },
               topologyWeightAuto: { type: "number" },
+              // v1.1: probability of adopting a non-greedy topology at selection time
+              topologyExploreRate: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               tiers: {
@@ -190,6 +194,7 @@ export const AdaptiveFusion = Rpc.define({
               "topologyWeightJev",
               "topologyWeightHumanCP",
               "topologyWeightAuto",
+              "topologyExploreRate",
               "chainMode",
               "tierMode",
               "tiers",

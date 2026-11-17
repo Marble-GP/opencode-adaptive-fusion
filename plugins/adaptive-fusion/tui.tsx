@@ -165,6 +165,16 @@ const WEIGHT_FIELDS: {
     ja: "応答あたりの補助呼び出し上限(コストガード)",
     en: "max auxiliary calls per response (cost guard)",
   },
+  {
+    alias: "topoexplore",
+    server: "topologyExploreRate",
+    min: 0,
+    max: 1,
+    sja: "トポロジー: 探索率(ε)",
+    sen: "topology: exploration rate",
+    ja: "トポロジー選択の ε-greedy 探索確率(0..1)。0 で貪欲選択のみ",
+    en: "ε-greedy exploration probability for topology selection (0..1). 0 = greedy only",
+  },
 ]
 
 // Presets for /fusion-weights (select option -> partial update).
@@ -205,6 +215,8 @@ type FusionConfig = {
   topologyWeightJev?: number
   topologyWeightHumanCP?: number
   topologyWeightAuto?: number
+  // v1.1: ε-greedy exploration rate for topology selection
+  topologyExploreRate?: number
   chainMode?: "off" | "active"
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
@@ -230,7 +242,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `reviewModel   : ${c.reviewModel ?? T("(classifierModel と同じ経路 / 共有フォールバック)", "(same path as classifierModel / shared fallback)")}`,
     `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・トポロジー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
     `topology      : ${c.topologyMode === "fixed" ? T("fixed / single 固定", "fixed / always single") : T(`auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`, `auto / ${(c.allowedTopologies ?? []).join(", ")} / aux call limit ${c.maxTopologyCalls ?? 4}`)}`,
-    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"}`,
+    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,

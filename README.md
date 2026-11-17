@@ -257,7 +257,7 @@ defaults only.
 
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
-| `/fusion-weights` | Batch-adjusts the eleven routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls`). |
+| `/fusion-weights` | Batch-adjusts the twelve routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore`). |
 | `/fusion-audit` | Sets the weight of the independent audit signal inside the routing quality term. `0` = shadow display only; `0.2` is typical when enabling it. Routing use stays behind gates: N ≥ 10 samples, quality axes only, and the weight is halved when audit vs human scores diverge by \|Δ\| ≥ 1.0. | `autoReviewWeight` (0..1) |
 | `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
 
@@ -323,9 +323,10 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `topologyMode` | `auto` | `auto` (Jev/observed stats) or `fixed` (single only). |
 | `allowedTopologies` | `["single","router","sequential-chain"]` | Whitelist of orchestration shapes. |
 | `maxTopologyCalls` | `4` | Upper bound of auxiliary calls per response (cost guard). |
-| `topologyWeightJev` | `0.5` | Weight (w1) of the Jev prior in topology selection. Forced to 0 without a Jev key. |
+| `topologyWeightJev` | `0.5` | Weight (w1) of the Jev prior in topology selection; also the Jev share of the blended selection distribution (v1.1). Forced to 0 without a Jev key. |
 | `topologyWeightHumanCP` | `0.25` | Weight (w2) of human cost-performance ratings. |
 | `topologyWeightAuto` | `0.25` | Weight (w3) of automatic quality/ok-rate observations. |
+| `topologyExploreRate` | `0.1` | Probability of adopting a non-greedy allowed topology (ε-greedy) instead of the argmax at selection time. `0` = greedy only. |
 | `chainMode` | `off` | `active` injects a planner-generated plan (8 s timeout) as reference context for sequential-chain turns. |
 | `tierMode` | `off` | `off` / `manual` (user-defined tiers) / `auto` (split candidates by benchmark score). |
 | `tiers` | all empty | Per-tier groups `{ heavy: [], middle: [], light: [] }` of `provider/model` refs. |
@@ -552,13 +553,28 @@ Planned multi-agent shapes are only comparable once implemented.
 | collaboration | Independent answers, judge consensus *(planned)* | N+1 |
 | graph | State-machine execution *(planned)* | dynamic |
 
-Topology selection uses, in order:
+Topology selection (v1.1):
 
-1. **Jev `Choice`** (with a key): confidence ≥ 0.7 wins; the probability distribution
-   is stored as a prior.
-2. **Learned weighted score** (without a key): `0.8 × auto-review quality + 0.2 × human
-   cost-performance`, requiring at least 3 observations per shape.
-3. **single** as the safe fallback.
+1. **Task-shape prior + Jev blend**: a deterministic prior is computed from the
+   load band (light/middle/heavy) and the task category
+   (`research`/`coding`/`writing`/`debugging` lean chain; `review`/`ops` lean
+   single), multiplied per shape by `(0.5 + D-4 score)` when ≥ 3 observations
+   exist for the category. When Jev answers (with a key), its probability
+   distribution is blended in with weight `topologyWeightJev`
+   (`(1 - w) × prior + w × Jev`, default 0.5/0.5). Without a key the prior
+   stands alone.
+2. **Exploration (ε)**: with probability `topologyExploreRate` (default `0.1`),
+   a random non-greedy allowed topology is adopted instead of the argmax, so
+   non-`single` shapes can accumulate a track record. Set `0` to disable.
+3. **Greedy = argmax** of the blended distribution; sequential-chain is picked
+   only when `maxTopologyCalls >= 2`; `chainMode=active` still controls planner
+   injection.
+
+Configuration of selection: `topologyMode` (`auto` / `fixed`), `allowedTopologies`,
+`topologyWeightJev` (w1, also the blend weight), `topologyWeightHumanCP` (w2),
+`topologyWeightAuto` (w3), and `topologyExploreRate` (ε). The persisted
+`fusion/topology/*` stats keep recording observations, priors, cost-performance
+ratings and auxiliary calls.
 
 `chainMode=active` enables sequential-chain planning injection: a planner call
 (8 s timeout) produces a 3–5 line plan that is pushed once into the system context

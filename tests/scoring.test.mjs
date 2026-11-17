@@ -131,6 +131,87 @@ check("probe rejects okay", probeOk("okay"), false);
 check("probe rejects empty", probeOk(""), false);
 check("probe rejects undefined", probeOk(undefined), false);
 
+// Task-shape topology prior (mirror of index.ts heuristicTopologyWeights /
+// normalizeTopologyWeights / jevTopologyDistribution). The prior favors
+// single by construction; heavy load shifts mass onto sequential-chain;
+// coding/research/writing/debugging boost chain, review/ops boost single.
+const heuristicTopologyWeights = (load, category) => {
+  let single, chain, router;
+  if (load === "light") {
+    single = 0.85; chain = 0.03; router = 0.02;
+  } else if (load === "middle") {
+    single = 0.6; chain = 0.14; router = 0.04;
+  } else if (load === "heavy") {
+    single = 0.3; chain = 0.52; router = 0.08;
+  } else {
+    single = 0.6; chain = 0.1; router = 0.04;
+  }
+  const cat = category ?? "";
+  if (cat === "research") { chain *= 1.6; router *= 2.0; }
+  else if (cat === "coding") chain *= 1.4;
+  else if (cat === "writing") chain *= 1.3;
+  else if (cat === "debugging") chain *= 1.2;
+  else if (cat === "review") { chain *= 0.7; single *= 1.2; router *= 1.5; }
+  else if (cat === "ops") { chain *= 0.5; single *= 1.3; }
+  return { single, router, "sequential-chain": chain };
+};
+const normalizeTopologyWeights = (weights) => {
+  let total = 0;
+  for (const v of Object.values(weights)) total += v;
+  if (total <= 0) return { single: 1 };
+  const out = {};
+  for (const [k, v] of Object.entries(weights)) out[k] = v / total;
+  return out;
+};
+const jevTopologyDistribution = (probabilities, choice, allowed) => {
+  const filtered = {};
+  for (const t of allowed) {
+    const v = probabilities?.[t];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) filtered[t] = v;
+  }
+  if (Object.keys(filtered).length === 0) {
+    for (const t of allowed) filtered[t] = 1;
+    if (choice && choice in filtered)
+      for (const t of Object.keys(filtered)) filtered[t] = t === choice ? 1 : 0;
+  }
+  return normalizeTopologyWeights(filtered);
+};
+const allowedThree = ["single", "router", "sequential-chain"];
+const sum1 = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+const normSingle = normalizeTopologyWeights(heuristicTopologyWeights(undefined, undefined));
+const normLight = normalizeTopologyWeights(heuristicTopologyWeights("light", undefined));
+const normHeavy = normalizeTopologyWeights(heuristicTopologyWeights("heavy", undefined));
+const normReview = normalizeTopologyWeights(heuristicTopologyWeights("heavy", "review"));
+const normCoding = normalizeTopologyWeights(heuristicTopologyWeights("heavy", "coding"));
+check("topology prior normalizes to 1 (unknown load)", sum1(normSingle), 1);
+check("topology prior normalizes to 1 (light)", sum1(normLight), 1);
+check("topology prior normalizes to 1 (heavy)", sum1(normHeavy), 1);
+check("light: single dominant", normLight.single > 0.7, true);
+check("heavy: chain probability > single probability", normHeavy["sequential-chain"] > normHeavy.single, true);
+check("heavy: chain prob >= 0.4", normHeavy["sequential-chain"] >= 0.4, true);
+check("review: chain reduced vs coding (heavy)", normReview["sequential-chain"] < normCoding["sequential-chain"], true);
+check("review: single boosted", normReview.single > normHeavy.single, true);
+check(
+  "topology weights normalize proportionally",
+  JSON.stringify(normalizeTopologyWeights({ single: 2, router: 1, "sequential-chain": 1 })),
+  JSON.stringify({ single: 0.5, router: 0.25, "sequential-chain": 0.25 }),
+);
+check(
+  "jev distribution: unknown keys excluded",
+  JSON.stringify(jevTopologyDistribution({ single: 0.9, hier: 0.1 }, "single", allowedThree)),
+  JSON.stringify({ single: 1 }),
+);
+check(
+  "jev distribution: uniform fallback without probabilities",
+  JSON.stringify(jevTopologyDistribution(undefined, undefined, allowedThree)),
+  JSON.stringify({ single: 1 / 3, router: 1 / 3, "sequential-chain": 1 / 3 }),
+);
+check(
+  "jev distribution: one-hot on choice when probs missing",
+  JSON.stringify(jevTopologyDistribution({}, "sequential-chain", allowedThree)),
+  JSON.stringify({ single: 0, router: 0, "sequential-chain": 1 }),
+);
+
 // Benchmark auto-refresh mapping (mirror of index.ts buildBenchmarkModels).
 // OpenRouter payload: benchmarks.artificial_analysis indices (0..100) are
 // normalized to 0..1; models without indices are skipped; coding falls back
