@@ -108,6 +108,8 @@ export const AdaptiveFusion = Rpc.define({
               lang: { type: "string", enum: ["ja", "en"] },
               // v1.0: independent-audit auto-review weight in routing quality
               autoReviewWeight: { type: "number" },
+              // v1.0: daily auto-refresh of the benchmark library (toggle-ON linked)
+              benchAutoUpdate: { type: "boolean" },
             },
             additionalProperties: false,
           },
@@ -161,6 +163,8 @@ export const AdaptiveFusion = Rpc.define({
               lang: { type: "string", enum: ["ja", "en"] },
               // v1.0: independent-audit auto-review weight
               autoReviewWeight: { type: "number" },
+              // v1.0: daily auto-refresh of the benchmark library
+              benchAutoUpdate: { type: "boolean" },
             },
             required: [
               "enabled",
@@ -192,6 +196,7 @@ export const AdaptiveFusion = Rpc.define({
               "jevAvailable",
               "lang",
               "autoReviewWeight",
+              "benchAutoUpdate",
             ],
           },
         },

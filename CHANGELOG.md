@@ -19,6 +19,13 @@
   passive learning (observation stats, task classification, shadow review,
   cooldown/recovery probes) keeps running in the background, so nothing is
   lost while paused and re-enabling is instant.
+- **Benchmark library auto-refresh (`benchAutoUpdate`)**: while fusion is ON,
+  the benchmark priors are refreshed from the public OpenRouter models API
+  (`artificial_analysis` indices, same ÷100 normalization as the seed file) at
+  most once per day, judged at the start of each turn. The fetched snapshot is
+  persisted to OpenCode storage (`fusion/benchmarks`) and takes precedence over
+  the bundled seed; non-OpenRouter keys are retained. Any failure keeps the
+  previous snapshot (fail-safe), and `/fusion-stats` reports the last result.
 - **`/fusion-weights`**: adjust the routing/topology weights that were
   previously only reachable through `opencode.json` options — five presets
   (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`) plus a

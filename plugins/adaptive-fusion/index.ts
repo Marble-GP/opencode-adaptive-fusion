@@ -51,6 +51,17 @@ const COOLDOWN_KEY = "fusion/cooldowns"
 const RESCUE_KEY = "fusion/rescue-attempts"
 // Benchmark seed (default: data/benchmarks.json at the repository root)
 const BENCHMARKS_DEFAULT_RELATIVE = ["data", "benchmarks.json"]
+// Auto-refresh (v1.0): when fusion is ON and cfg.benchAutoUpdate is set, the
+// benchmark library is refreshed from the public OpenRouter models API at most
+// once per day. Fetched data is persisted to OpenCode storage (never written
+// into the plugin directory); the bundled data/benchmarks.json remains as the
+// seed/fallback. Any failure keeps the previous snapshot (fail-safe).
+const BENCHMARKS_AUTO_KEY = "fusion/benchmarks"
+const BENCH_CHECK_KEY = "fusion/bench-check"
+const BENCH_API_URL = "https://openrouter.ai/api/v1/models"
+const BENCH_CHECK_INTERVAL_MS = 24 * 60 * 60_000
+const BENCH_FETCH_TIMEOUT_MS = 15_000
+const BENCH_AUTO_MIN_MODELS = 20 // refuse to store a suspiciously small snapshot
 
 type Stat = {
   model: { providerID: string; id: string }
@@ -192,6 +203,11 @@ type FusionConfig = {
   benchmarkPriorWeight: number
   // Path of the benchmark seed. Default is relative to the plugin
   benchmarksFile: string
+  // Daily auto-refresh of the benchmark library from the public OpenRouter
+  // models API (v1.0). ON by default and linked to the fusion toggle: it only
+  // runs while routing is enabled. Disable via opencode.json options
+  // (benchAutoUpdate: false) or the config RPC.
+  benchAutoUpdate: boolean
   // Model in charge of inner review (shadow). Defaults to the same fallback path as classifierModel
   reviewModel: string | null
   // Jev (TypeSafe) integration. auto = enabled when an API key is detected / off = always the legacy path
@@ -318,6 +334,7 @@ export default Plugin.define({
         ctx.options.benchmarksFile.length > 0
           ? ctx.options.benchmarksFile
           : "",
+      benchAutoUpdate: ctx.options.benchAutoUpdate !== false,
       classifierModel:
         typeof ctx.options.classifierModel === "string" &&
         ctx.options.classifierModel.includes("/")
@@ -405,6 +422,8 @@ export default Plugin.define({
         cfg.benchmarkPriorWeight = Math.max(0, s.benchmarkPriorWeight)
       if (typeof s.benchmarksFile === "string")
         cfg.benchmarksFile = s.benchmarksFile
+      if (typeof s.benchAutoUpdate === "boolean")
+        cfg.benchAutoUpdate = s.benchAutoUpdate
       if (typeof s.classifierModel === "string")
         cfg.classifierModel = s.classifierModel.includes("/")
           ? s.classifierModel
@@ -1154,6 +1173,165 @@ export default Plugin.define({
       } catch {
         return undefined
       }
+    }
+    // ---- auto-refresh (v1.0): storage-backed benchmark snapshot ----
+    // Fetched snapshots stored via the OpenRouter refresh take precedence over
+    // the bundled seed file. Set at setup (from storage) and on every refresh.
+    let storedBenchmarks: BenchmarkFile | undefined
+    // Fall back to file only when storage has nothing usable.
+    const currentBenchmarks = (): BenchmarkFile | undefined =>
+      storedBenchmarks ?? loadBenchmarks()
+    // Pure mapping from the OpenRouter models payload to normalized priors.
+    // Mirrors the seed-file normalization (÷100, clip). Unusable models (no
+    // artificial_analysis indices) are skipped; coding falls back to the
+    // intelligence index; ops falls back agentic→intelligence; review is the
+    // mean of intelligence and (agentic ?? intelligence).
+    const buildBenchmarkModels = (
+      rawModels: unknown[],
+    ): Record<string, BenchmarkEntry> => {
+      const clampIdx = (value: unknown): number | undefined => {
+        // typeof check: Number(null) is 0 (finite) and would poison the
+        // agentic/intelligence fallbacks; null/undefined mean "missing".
+        if (typeof value !== "number" || !Number.isFinite(value))
+          return undefined
+        return Math.min(1, Math.max(0, value / 100))
+      }
+      const out: Record<string, BenchmarkEntry> = {}
+      for (const raw of rawModels) {
+        const m = raw as {
+          id?: unknown
+          benchmarks?: { artificial_analysis?: Record<string, unknown> }
+        } | null
+        const id = typeof m?.id === "string" ? m.id : undefined
+        if (!id) continue
+        const aa = m?.benchmarks?.artificial_analysis
+        const intelligence = clampIdx(aa?.intelligence_index)
+        if (intelligence === undefined) continue
+        const coding = clampIdx(aa?.coding_index) ?? intelligence
+        const agentic = clampIdx(aa?.agentic_index)
+        out[`openrouter/${id}`] = {
+          overall: intelligence,
+          coding,
+          debugging: coding,
+          research: intelligence,
+          writing: intelligence,
+          ops: agentic ?? intelligence,
+          review: (intelligence + (agentic ?? intelligence)) / 2,
+        }
+      }
+      return out
+    }
+    type BenchCheckMeta = {
+      lastCheckAt: number
+      lastResult: string
+      lastModelCount?: number
+      lastFetchedAt?: string
+      updatedAt: string
+    }
+    let benchCheckRunning = false
+    // Refreshes the benchmark library from the public API when fusion is ON
+    // and cfg.benchAutoUpdate is set. At most once per day. Any failure keeps
+    // the previous snapshot (fail-safe); the marker is written BEFORE the
+    // fetch so the duplicate role=server plugin instance does not double-fetch.
+    const maybeAutoUpdateBenchmarks = async () => {
+      if (!cfg.enabled || !cfg.benchAutoUpdate) return
+      if (benchCheckRunning) return
+      let meta: BenchCheckMeta | undefined
+      try {
+        meta = (await ctx.storage.get(BENCH_CHECK_KEY)) as BenchCheckMeta | undefined
+      } catch {
+        meta = undefined
+      }
+      const last = typeof meta?.lastCheckAt === "number" ? meta.lastCheckAt : 0
+      if (Date.now() - last < BENCH_CHECK_INTERVAL_MS) return
+      benchCheckRunning = true
+      try {
+        // Mark the check as done up-front (lock for other instances).
+        await ctx.storage
+          .set(BENCH_CHECK_KEY, {
+            ...(meta ?? {}),
+            lastCheckAt: Date.now(),
+            lastResult: "checking",
+            updatedAt: new Date().toISOString(),
+          })
+          .catch(() => {})
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), BENCH_FETCH_TIMEOUT_MS)
+        let parsed: Record<string, BenchmarkEntry> = {}
+        try {
+          const resp = await fetch(BENCH_API_URL, {
+            signal: controller.signal,
+            headers: { accept: "application/json" },
+          })
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+          const body: unknown = await resp.json()
+          const rawModels = Array.isArray((body as { data?: unknown[] })?.data)
+            ? ((body as { data: unknown[] }).data as unknown[])
+            : []
+          parsed = buildBenchmarkModels(rawModels)
+        } finally {
+          clearTimeout(timer)
+        }
+        if (Object.keys(parsed).length < BENCH_AUTO_MIN_MODELS)
+          throw new Error(`too few usable models (${Object.keys(parsed).length})`)
+        // Keep entries that cannot be refreshed from this source
+        // (any non-openrouter key, e.g. opencode/* provider ids).
+        const previous = currentBenchmarks()
+        const retained: Record<string, BenchmarkEntry> = {}
+        for (const [key, value] of Object.entries(previous?.models ?? {}))
+          if (!key.startsWith("openrouter/")) retained[key] = value
+        const next: BenchmarkFile = {
+          fetchedAt: new Date().toISOString(),
+          source:
+            "auto-refresh: OpenRouter /api/v1/models (artificial_analysis, normalized /100)",
+          note: "Auto-updated by the plugin (fusion ON + benchAutoUpdate). Non-OpenRouter keys are retained from the previous snapshot.",
+          models: { ...parsed, ...retained },
+        }
+        await ctx.storage.set(BENCHMARKS_AUTO_KEY, next)
+        storedBenchmarks = next
+        const retainedCount = Object.keys(retained).length
+        const result = `ok ${Object.keys(parsed).length} models (${retainedCount} retained)`
+        await ctx.storage.set(BENCH_CHECK_KEY, {
+          lastCheckAt: Date.now(),
+          lastResult: result,
+          lastModelCount: Object.keys(parsed).length,
+          lastFetchedAt: next.fetchedAt,
+          updatedAt: new Date().toISOString(),
+        })
+        logRoute(`BENCH auto-update ${result}`)
+      } catch (error) {
+        const result = `fail: ${String(error).slice(0, 120)}`
+        try {
+          await ctx.storage.set(BENCH_CHECK_KEY, {
+            ...(meta ?? {}),
+            lastCheckAt: Date.now(),
+            lastResult: result,
+            updatedAt: new Date().toISOString(),
+          })
+        } catch {
+          // Even failure-marker persistence must not block normal processing
+        }
+        logRoute(`BENCH auto-update ${result}`)
+      } finally {
+        benchCheckRunning = false
+      }
+    }
+    // Setup-time restore: prefer the storage snapshot (newer, auto-refreshed),
+    // fall back to the bundled seed file.
+    try {
+      const stored = (await ctx.storage.get(BENCHMARKS_AUTO_KEY)) as
+        | BenchmarkFile
+        | undefined
+      if (
+        stored &&
+        typeof stored === "object" &&
+        stored.models &&
+        typeof stored.models === "object" &&
+        Object.keys(stored.models).length > 0
+      )
+        storedBenchmarks = stored
+    } catch {
+      // Storage unreadable: fall back to the file seed
     }
     // If the priors file is older than 90 days, halve k (staleness mitigation)
     const benchmarkPriorK = (benchmarks?: BenchmarkFile): number => {
@@ -2343,6 +2521,10 @@ export default Plugin.define({
       } catch {
         // Resync failure does not block normal processing
       }
+      // v1.0: benchmark auto-refresh (toggle-ON gated, at most once per day).
+      // Fire-and-forget: it never blocks the prompt; failures only mark the
+      // check marker and keep the previous snapshot.
+      if (cfg.enabled) void maybeAutoUpdateBenchmarks()
       // v1.0: OFF stops the ACTIVE behavior only — no model switching at all
       // (pre-rescue and rescue-restore are self-guarded in switchSessionIfCooling).
       // Classification keeps running: it is passive learning (per-category stats),
@@ -2859,7 +3041,7 @@ export default Plugin.define({
     const normRef = (ref: string) => ref.replace(/:free$/, "")
 
     const autoTiers = (): Record<TierName, string[]> | undefined => {
-      const benchmarks = loadBenchmarks()
+      const benchmarks = currentBenchmarks()
       const models = benchmarks?.models
       if (!models) return undefined
       const entries: { ref: string; score: number }[] = []
@@ -3009,7 +3191,7 @@ export default Plugin.define({
         Math.max(...models.map((m) => routingCostOf(m))) || 1
       // Benchmark prior (v0.6): applied to candidates after the budget filter.
       // If the file is missing / k=0, the benchmark side is disabled.
-      const benchmarks = loadBenchmarks()
+      const benchmarks = currentBenchmarks()
       const benchK = benchmarkPriorK(benchmarks)
 
       const entries: {
@@ -3695,7 +3877,7 @@ export default Plugin.define({
           ),
         )
       {
-        const benchmarks = loadBenchmarks()
+        const benchmarks = currentBenchmarks()
         const k = benchmarkPriorK(benchmarks)
         if (cfg.benchmarkPriorWeight <= 0) {
           lines.push(
@@ -3715,14 +3897,33 @@ export default Plugin.define({
           const ts = Date.parse(benchmarks.fetchedAt ?? "")
           const stale =
             Number.isFinite(ts) && Date.now() - ts > 90 * 24 * 60 * 60_000
+          const source =
+            storedBenchmarks && storedBenchmarks === benchmarks
+              ? tr("自動更新スナップショット", "auto-refreshed snapshot")
+              : tr("同梱シード", "bundled seed")
           lines.push(
             tr(
               `(ベンチマーク事前: 有効 k=${k} / モデル数 ${Object.keys(benchmarks.models ?? {}).length}` +
-                ` / fetchedAt ${(benchmarks.fetchedAt ?? "不明").slice(0, 10)}${stale ? " / 90日経過: kを半減(陳腐化対策)" : ""})`,
+                ` / fetchedAt ${(benchmarks.fetchedAt ?? "不明").slice(0, 10)}${stale ? " / 90日経過: kを半減(陳腐化対策)" : ""} / ${source})`,
               `(benchmark prior: active k=${k} / models ${Object.keys(benchmarks.models ?? {}).length}` +
-                ` / fetchedAt ${(benchmarks.fetchedAt ?? "unknown").slice(0, 10)}${stale ? " / older than 90 days: k halved (staleness guard)" : ""})`,
+                ` / fetchedAt ${(benchmarks.fetchedAt ?? "unknown").slice(0, 10)}${stale ? " / older than 90 days: k halved (staleness guard)" : ""} / ${source})`,
             ),
           )
+          // Auto-refresh status (toggle-ON linked, once per day)
+          try {
+            const meta = (await ctx.storage.get(BENCH_CHECK_KEY)) as
+              | { lastResult?: string; lastFetchedAt?: string }
+              | undefined
+            const last = meta?.lastResult ?? tr("未チェック", "not checked yet")
+            lines.push(
+              tr(
+                `(自動更新: ${cfg.benchAutoUpdate ? "ON(トグル連動・1日1回)" : "OFF"} / 状態: ${last})`,
+                `(auto-refresh: ${cfg.benchAutoUpdate ? "ON (toggle-linked, once per day)" : "OFF"} / status: ${last})`,
+              ),
+            )
+          } catch {
+            // Meta unreadable: ignore
+          }
         }
       }
           // Jev availability and topology-mode status
@@ -4158,6 +4359,8 @@ export default Plugin.define({
       if (typeof update.maxOutputCost === "number") cfg.maxOutputCost = Math.max(0, update.maxOutputCost)
       if (typeof update.benchmarkPriorWeight === "number") cfg.benchmarkPriorWeight = Math.max(0, update.benchmarkPriorWeight)
       if (typeof update.benchmarksFile === "string") cfg.benchmarksFile = update.benchmarksFile
+      if (typeof update.benchAutoUpdate === "boolean")
+        cfg.benchAutoUpdate = update.benchAutoUpdate
       if (update.jevMode === "auto" || update.jevMode === "off") cfg.jevMode = update.jevMode
       if (update.topologyMode === "auto" || update.topologyMode === "fixed") cfg.topologyMode = update.topologyMode
       if (typeof update.maxTopologyCalls === "number") cfg.maxTopologyCalls = clamp(Math.floor(update.maxTopologyCalls), 1, 16)

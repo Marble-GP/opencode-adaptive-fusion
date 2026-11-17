@@ -268,6 +268,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `kinds` | `["primary"]` | Request kinds to route (`primary / compaction / title / generate`). |
 | `benchmarkPriorWeight` | `5` | Strength (k) of the benchmark prior. `0` disables it. |
 | `benchmarksFile` | `data/benchmarks.json` | Benchmark seed file (relative paths resolve against the plugin). |
+| `benchAutoUpdate` | `true` | While fusion is ON, refresh the benchmark library from the OpenRouter models API at most once per day (stored in OpenCode storage; fail-safe keeps the previous snapshot). |
 | `reviewModel` | (none) | Shadow auto-review model. Falls back like `classifierModel` when unset. |
 | `autoReviewWeight` | `0` | Weight (0..1) of the independent-audit auto-review signal inside the routing quality term. `0` = shadow display only. Set with `/fusion-audit`. |
 | `topologyMode` | `auto` | `auto` (Jev/observed stats) or `fixed` (single only). |
@@ -540,6 +541,27 @@ samples weigh `n / (n + k)`, so **recorded results eventually dominate the prior
 Models absent from the file are neutral (0.5, no penalty). Priors older than 90 days
 (`fetchedAt`) are halved. Priors apply only to candidates that pass the cost cap.
 
+### Auto-refresh (v1.0)
+
+Stale priors are the biggest threat to routing quality, so v1.0 refreshes the library
+automatically — but never silently:
+
+- **Linked to the fusion toggle**: the daily check runs only while routing is enabled.
+  With `/fusion-toggle` OFF nothing reaches the network *or* the models.
+- **Once per day**, judged at the start of each turn (a persisted marker avoids
+  duplicate fetches between the server's plugin instances).
+- **Fetches the public OpenRouter models API** (`/api/v1/models`,
+  `benchmarks.artificial_analysis` indices, normalized ÷100 — the same normalization
+  as the seed file). No API key is sent anywhere.
+- **Fail-safe**: any error (network, parse, or fewer than 20 usable models) keeps the
+  previous snapshot; the failure is recorded in `/fusion-stats`.
+- **Stored in OpenCode storage** (`fusion/benchmarks`), never written into the plugin
+  directory. Entries that cannot be refreshed from this source (e.g. `opencode/*`
+  provider ids) are retained from the previous snapshot.
+- **Disable** with `"benchAutoUpdate": false` in the plugin options (or the
+  `benchAutoUpdate` field of the config RPC). `/fusion-stats` shows the current state;
+  `/fusion-config` shows `auto-refresh ON/OFF`.
+
 ---
 
 ## Known limitations
@@ -570,10 +592,10 @@ Models absent from the file are neutral (0.5, no penalty). Priors older than 90 
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
-| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch | **In development** |
+| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, benchmark library auto-refresh (toggle-ON, daily) | **In development** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation | Planned |
-| v1.0+ | benchmark refresh automation, test harness, comparative experiments | Planned |
+| v1.0+ | test harness, comparative experiments | Planned |
 
 ---
 

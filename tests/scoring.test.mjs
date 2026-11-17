@@ -131,6 +131,63 @@ check("probe rejects okay", probeOk("okay"), false);
 check("probe rejects empty", probeOk(""), false);
 check("probe rejects undefined", probeOk(undefined), false);
 
+// Benchmark auto-refresh mapping (mirror of index.ts buildBenchmarkModels).
+// OpenRouter payload: benchmarks.artificial_analysis indices (0..100) are
+// normalized to 0..1; models without indices are skipped; coding falls back
+// to intelligence, ops falls back agentic->intelligence, review is the mean
+// of intelligence and (agentic ?? intelligence).
+const buildBenchmarkModels = (rawModels) => {
+  const clampIdx = (value) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+    return Math.min(1, Math.max(0, value / 100));
+  };
+  const out = {};
+  for (const raw of rawModels) {
+    const id = typeof raw?.id === "string" ? raw.id : undefined;
+    if (!id) continue;
+    const aa = raw?.benchmarks?.artificial_analysis;
+    const intelligence = clampIdx(aa?.intelligence_index);
+    if (intelligence === undefined) continue;
+    const coding = clampIdx(aa?.coding_index) ?? intelligence;
+    const agentic = clampIdx(aa?.agentic_index);
+    out[`openrouter/${id}`] = {
+      overall: intelligence,
+      coding,
+      debugging: coding,
+      research: intelligence,
+      writing: intelligence,
+      ops: agentic ?? intelligence,
+      review: (intelligence + (agentic ?? intelligence)) / 2,
+    };
+  }
+  return out;
+};
+const aaOf = (i, c, a) => ({
+  benchmarks: {
+    artificial_analysis: {
+      intelligence_index: i,
+      coding_index: c,
+      agentic_index: a,
+    },
+  },
+});
+const mapped = buildBenchmarkModels([
+  { id: "acme/full", ...aaOf(31.7, 74.8, 53.1) },
+  { id: "acme/no-coding", ...aaOf(20, null, 40) },
+  { id: "acme/no-agentic", ...aaOf(10, 30, null) },
+  { id: "acme/no-indices", ...({}) },
+  { id: 42, ...aaOf(50, 50, 50) },
+]);
+check("maps 3 of 5 entries", Object.keys(mapped).length, 3);
+check("normalizes /100", mapped["openrouter/acme/full"].overall, 0.317);
+check("coding passes through", mapped["openrouter/acme/full"].coding, 0.748);
+check("review = mean(intel, agentic)", mapped["openrouter/acme/full"].review, (0.317 + 0.531) / 2);
+check("coding null falls back to intelligence", mapped["openrouter/acme/no-coding"].coding, 0.2);
+check("agentic null: ops falls back to intelligence", mapped["openrouter/acme/no-agentic"].ops, 0.1);
+check("agentic null: review = intelligence", mapped["openrouter/acme/no-agentic"].review, 0.1);
+check("out-of-range clipped", buildBenchmarkModels([{ id: "x/clip", ...aaOf(150, -20, 50) }])["openrouter/x/clip"].overall, 1);
+
+
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);
   process.exit(1);

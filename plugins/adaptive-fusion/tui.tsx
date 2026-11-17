@@ -213,6 +213,8 @@ type FusionConfig = {
   lang?: "ja" | "en"
   // v1.0: independent-audit auto-review weight in routing quality (0 = shadow only)
   autoReviewWeight?: number
+  // v1.0: daily auto-refresh of the benchmark library (toggle-ON linked)
+  benchAutoUpdate?: boolean
 }
 
 const formatConfig = (c: FusionConfig, en = false): string => {
@@ -235,7 +237,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${T("(ホワイトリスト空時のみ)", " (only when the whitelist is empty)")}`,
-    `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}`,
+    `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}${c.benchAutoUpdate === false ? " / auto-refresh OFF" : " / auto-refresh ON (daily)"}`,
     `kinds         : ${(c.kinds ?? []).join(", ")}`,
     `models(white) : ${(c.models ?? []).length === 0 ? T("(全候補 + コスト上限)", "(all candidates + cost cap)") : (c.models ?? []).join(", ")}`,
   ]
