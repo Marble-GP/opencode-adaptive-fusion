@@ -1178,9 +1178,12 @@ export default Plugin.define({
     // Fetched snapshots stored via the OpenRouter refresh take precedence over
     // the bundled seed file. Set at setup (from storage) and on every refresh.
     let storedBenchmarks: BenchmarkFile | undefined
-    // Fall back to file only when storage has nothing usable.
+    // Resolution order: an explicit benchmarksFile always wins (user intent),
+    // then the auto-refreshed storage snapshot, then the bundled seed file.
     const currentBenchmarks = (): BenchmarkFile | undefined =>
-      storedBenchmarks ?? loadBenchmarks()
+      cfg.benchmarksFile?.length > 0
+        ? loadBenchmarks()
+        : storedBenchmarks ?? loadBenchmarks()
     // Pure mapping from the OpenRouter models payload to normalized priors.
     // Mirrors the seed-file normalization (÷100, clip). Unusable models (no
     // artificial_analysis indices) are skipped; coding falls back to the
@@ -1235,6 +1238,9 @@ export default Plugin.define({
     // fetch so the duplicate role=server plugin instance does not double-fetch.
     const maybeAutoUpdateBenchmarks = async () => {
       if (!cfg.enabled || !cfg.benchAutoUpdate) return
+      // A custom benchmarksFile is an explicit user choice: the refresh must
+      // not silently compete with it (the file always wins in resolution).
+      if (cfg.benchmarksFile.length > 0) return
       if (benchCheckRunning) return
       let meta: BenchCheckMeta | undefined
       try {
@@ -3915,10 +3921,15 @@ export default Plugin.define({
               | { lastResult?: string; lastFetchedAt?: string }
               | undefined
             const last = meta?.lastResult ?? tr("未チェック", "not checked yet")
+            const mode = cfg.benchmarksFile
+              ? tr("スキップ(カスタム benchmarksFile 使用)", "skipped (custom benchmarksFile)")
+              : cfg.benchAutoUpdate
+                ? tr("ON(トグル連動・1日1回)", "ON (toggle-linked, once per day)")
+                : "OFF"
             lines.push(
               tr(
-                `(自動更新: ${cfg.benchAutoUpdate ? "ON(トグル連動・1日1回)" : "OFF"} / 状態: ${last})`,
-                `(auto-refresh: ${cfg.benchAutoUpdate ? "ON (toggle-linked, once per day)" : "OFF"} / status: ${last})`,
+                `(自動更新: ${mode} / 状態: ${last})`,
+                `(auto-refresh: ${mode} / status: ${last})`,
               ),
             )
           } catch {

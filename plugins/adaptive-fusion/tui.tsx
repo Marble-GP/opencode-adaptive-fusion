@@ -237,7 +237,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${T("(ホワイトリスト空時のみ)", " (only when the whitelist is empty)")}`,
-    `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}${c.benchAutoUpdate === false ? " / auto-refresh OFF" : " / auto-refresh ON (daily)"}`,
+    `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}${c.benchAutoUpdate === false ? " / auto-refresh OFF" : c.benchAutoUpdate === true ? (c.benchmarksFile ? " / auto-refresh skipped (custom file)" : " / auto-refresh ON (daily)") : ""}`,
     `kinds         : ${(c.kinds ?? []).join(", ")}`,
     `models(white) : ${(c.models ?? []).length === 0 ? T("(全候補 + コスト上限)", "(all candidates + cost cap)") : (c.models ?? []).join(", ")}`,
   ]

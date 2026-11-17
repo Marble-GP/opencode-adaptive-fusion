@@ -555,6 +555,9 @@ automatically — but never silently:
   as the seed file). No API key is sent anywhere.
 - **Fail-safe**: any error (network, parse, or fewer than 20 usable models) keeps the
   previous snapshot; the failure is recorded in `/fusion-stats`.
+- **Explicit files win**: setting `benchmarksFile` to your own path disables the
+  auto-refresh (the configured file always takes precedence and is never competed
+  with); the status line says `skipped (custom benchmarksFile)`.
 - **Stored in OpenCode storage** (`fusion/benchmarks`), never written into the plugin
   directory. Entries that cannot be refreshed from this source (e.g. `opencode/*`
   provider ids) are retained from the previous snapshot.
