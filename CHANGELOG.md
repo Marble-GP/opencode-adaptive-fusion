@@ -12,6 +12,13 @@
 - **Full-turn cost model**: the routing cost penalty now compares
   `input + output + cache.read + cache.write` unit prices (USD/1M tokens)
   instead of output price alone.
+- **OFF stops every model switch**: `/fusion-toggle` OFF previously kept the
+  rescue path active (cooling models were still switched away). OFF now stops
+  all user-visible behavior — routing, pre-prompt rescue, after-fail rescue
+  and rescue-restore never touch the session model while disabled — while
+  passive learning (observation stats, task classification, shadow review,
+  cooldown/recovery probes) keeps running in the background, so nothing is
+  lost while paused and re-enabling is instant.
 - **`/fusion-weights`**: adjust the routing/topology weights that were
   previously only reachable through `opencode.json` options — five presets
   (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`) plus a

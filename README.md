@@ -15,6 +15,10 @@ rate limits, and continuously improves from HTTP outcomes and human/LLM reviews.
   success-rate/latency statistics, and only routes after you enable it.
 - **Automatic rescue** — detects unusable models (quota exhaustion, provider errors),
   cools them down with live verification, and moves the session to a healthy model.
+  **Rescue runs only while routing is enabled**: `/fusion-toggle` OFF stops every
+  user-visible model switch (routing, rescue, restore), while passive learning
+  (observation, classification, shadow review, recovery probes) keeps running
+  in the background so nothing is lost while paused.
 - **Review & feedback loop** — `/fusion-review` rates responses (1–5), shows per-turn
   token/cost/throughput statistics, and can review **older turns** after a bug surfaces.
 - **Shadow auto-review** — a separate lightweight model scores every response on four
@@ -219,7 +223,7 @@ messages to the agent and never pollute session history.
 | Command | Description |
 | --- | --- |
 | `/fusion-stats` | Show learning statistics (including human rating averages and cost caps). |
-| `/fusion-toggle` | Toggle routing ON/OFF (toast). Rescue keeps working when routing is OFF. |
+| `/fusion-toggle` | Toggle routing ON/OFF (toast). **OFF stops every model switch** (routing, rescue, restore); passive learning (observation, classification, shadow review, probes) continues in the background. |
 | `/fusion-config` | Show the current configuration. |
 | `/fusion-lang` | Switch the display language of commands and dialogs between Japanese and English (persisted). |
 | `/fusion-costcap` | Edit input/output cost caps used when the whitelist is empty (default `0,0`). |
@@ -566,7 +570,7 @@ Models absent from the file are neutral (0.5, no penalty). Priors older than 90 
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
-| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe | **In development** |
+| **v1.0 (in development)** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch | **In development** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation | Planned |
 | v1.0+ | benchmark refresh automation, test harness, comparative experiments | Planned |

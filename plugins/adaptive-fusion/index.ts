@@ -22,7 +22,9 @@
 //  - Free-tier (quota) failures are excluded from the quality penalty and only get a long cooldown (6h)
 //  - quota failures cool down per provider (free tier is account-wide)
 //  - when a successful HTTP observation arrives, the cooldown is lifted (recovery detection)
-//  - rescue mode: even with routing OFF, if the current model is cooling down, automatically fall back to a healthy model
+//  - rescue mode (v1.0: ON only): if the current model is cooling down, automatically fall back to a healthy model.
+//    OFF stops every model switch (routing + rescue); passive learning (observation, classification,
+//    shadow review, recovery probes) keeps running in the background.
 
 import * as fs from "node:fs"
 import * as path from "node:path"
@@ -956,6 +958,10 @@ export default Plugin.define({
     const verifyingNow = new Set<string>()
 
     const scheduleVerification = (ref: string) => {
+      // v1.0: verification probes are passive learning (recovery detection for
+      // the cooldown map), not session model switches, so they keep running
+      // while OFF. The tiny "Reply with exactly: OK" call is the only way to
+      // learn that a quota window has actually lifted.
       const entry = cooldowns.get(ref)
       if (!entry || !entry.needsVerify) return
       if (verifyingNow.has(ref)) return
@@ -1067,9 +1073,10 @@ export default Plugin.define({
               true,
             )
           }
-          // Switch the session model immediately after failure so the next resume
-          // does not pick the same unavailable model again.
-          if (typeof event.data?.sessionID === "string") {
+          // v1.0: cooldown marking + failure stats are passive learning and keep
+          // running while OFF. The after-fail model switch is ACTIVE behavior —
+          // skip it while OFF ("it switched models even though I turned it off").
+          if (cfg.enabled && typeof event.data?.sessionID === "string") {
             const targetRef = ref
             const currentCategory = sessionCategory.get(event.data.sessionID)
             const choice = await pick(
@@ -2249,6 +2256,9 @@ export default Plugin.define({
       sessionID: string,
       category?: string,
     ) => {
+      // v1.0: OFF stops all behavior (double safety: every caller is gated,
+      // this guard keeps future call sites safe too).
+      if (!cfg.enabled) return
       try {
         const session: any = await ctx.session.get({ sessionID })
         let model = session?.model
@@ -2333,6 +2343,11 @@ export default Plugin.define({
       } catch {
         // Resync failure does not block normal processing
       }
+      // v1.0: OFF stops the ACTIVE behavior only — no model switching at all
+      // (pre-rescue and rescue-restore are self-guarded in switchSessionIfCooling).
+      // Classification keeps running: it is passive learning (per-category stats),
+      // makes no model switches, and keeps the observations usable the moment
+      // routing is re-enabled.
       try {
         await classify(event.sessionID, event.prompt.text)
       } catch (error) {
@@ -2768,6 +2783,7 @@ export default Plugin.define({
 
     await ctx.session.hook("http.request", (event) => {
       if (!kinds.includes(event.kind)) return
+      // v1.0: passive observation (learning) keeps running while OFF.
       // Record providers other than the target too (for assessing rescue-target health).
       // crossProvider decisions happen in the resolve hook.
       pending.set(event.sessionID, {
@@ -2779,6 +2795,9 @@ export default Plugin.define({
 
     await ctx.session.hook("http.response", async (event) => {
       if (!kinds.includes(event.kind)) return
+      // v1.0: observation, recovery detection and the shadow review are passive
+      // learning and keep running while OFF; the model switches inside are
+      // self-guarded in switchSessionIfCooling.
       const observed = pending.get(event.sessionID)
       pending.delete(event.sessionID)
       if (!observed) return
@@ -3171,15 +3190,21 @@ export default Plugin.define({
       if (!cfg.crossProvider && event.model.providerID !== cfg.providerID)
         return
       const currentRef = refFor(event.model.providerID, event.model.id)
-      // Rescue decision: if the current model is cooling down (recently unavailable),
-      // intervene even with routing OFF and fall back to a healthy model.
+      // v1.0: OFF stops every model switch, rescue included. While disabled this
+      // hook never rewrites models ("it switched models even though I turned it
+      // off" was the reported confusion); ON is restored by the config resync
+      // that runs at the start of every prompt. Passive learning (observation,
+      // classification, shadow review, recovery probes) keeps running in the
+      // other hooks.
+      if (!cfg.enabled) {
+        logRoute(`SKIP ${event.kind} ${currentRef} (routing off, no model switches)`)
+        return
+      }
+      // Rescue decision (ON only): if the current model is cooling down (recently
+      // unavailable), fall back to a healthy model instead of scoring.
       // (Free-tier models remain enabled in the catalog but resolve becomes impossible,
       //  so detection is based on failure history = cooldown)
       const rescue = cool(currentRef)
-      if (!cfg.enabled && !rescue) {
-        logRoute(`SKIP ${event.kind} ${currentRef} (routing off, alive)`)
-        return
-      }
       const choice = await pick(
         currentRef,
         sessionCategory.get(event.sessionID),
@@ -3649,7 +3674,12 @@ export default Plugin.define({
         ),
       )
       if (!cfg.enabled)
-        lines.push(tr("(ルーティング: OFF / 観測のみ)", "(routing: OFF / observing only)"))
+        lines.push(
+          tr(
+            "(ルーティング: OFF / モデル切替はすべて停止・学習(観測)は継続)",
+            "(routing: OFF / no model switches; passive learning continues)",
+          ),
+        )
       if (cfg.crossProvider)
         lines.push(
           tr(
