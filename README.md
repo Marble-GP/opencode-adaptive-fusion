@@ -205,13 +205,13 @@ you configure plus optional Jev calls.
 3. When enough observations exist, enable routing with `/fusion-toggle`.
 4. Review results with `/fusion-stats`, adjust candidates with `/fusion-whitelist`,
    and rate responses with `/fusion-review`. The [slash command
-   reference](#commands) documents all 17 commands, their dialogs and what each
+   reference](#commands) documents all 15 commands, their dialogs and what each
    one persists.
 
 **Cost cap is zero by default.** When the whitelist is empty, only models whose
 input/output rates are within `maxInputCost`/`maxOutputCost` are eligible — and the
-default of `0,0` means **free models only**. Raise the cap with `/fusion-costcap`
-(`input,output` in USD per 1M tokens, e.g. `0.3,2.0`) or pin paid models explicitly
+default of `0,0` means **free models only**. Raise the caps with `/fusion-params`
+(`costin` / `costout`, USD per 1M tokens, e.g. `0.3` / `2.0`) or pin paid models explicitly
 in the whitelist.
 
 ### Language
@@ -251,14 +251,12 @@ defaults only.
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
 | `/fusion-provider` | Changes the routing target provider (`provider-id`, e.g. `opencode` / `openrouter`). | `providerID`; the whitelist is reset with it, because model ids depend on the provider. |
 | `/fusion-whitelist` | Edits the candidate whitelist (comma-separated). With `crossProvider: true` use full `provider/model-id` refs, otherwise bare model ids. | `models` — empty means all eligible candidates, subject to the cost caps. |
-| `/fusion-costcap` | Edits the `input,output` cost caps (USD / 1M tokens) that apply when the whitelist is empty. | `maxInputCost`, `maxOutputCost` — `0,0` means free models only. |
 
 ### Score tuning
 
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
-| `/fusion-params` | Batch-adjust the thirteen routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. `/fusion-weights` still works as an alias. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
-| `/fusion-audit` | Sets the weight of the independent audit signal inside the routing quality term. `0` = shadow display only; `0.2` is typical when enabling it. Routing use stays behind gates: N ≥ 10 samples, quality axes only, and the weight is halved when audit vs human scores diverge by \|Δ\| ≥ 1.0. | `autoReviewWeight` (0..1) |
+| `/fusion-params` | Batch-adjust the routing/topology coefficients and cost caps. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. `/fusion-weights` still works as an alias; the former `/fusion-audit` (`audit`) and `/fusion-costcap` (`costin` / `costout`) are covered here. | `costWeight`, `latencyWeight`, `maxInputCost`, `maxOutputCost`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost costin costout latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
 | `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
 
 ### Topology & tiers
@@ -320,7 +318,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `benchmarksFile` | `data/benchmarks.json` | Benchmark seed file (relative paths resolve against the plugin). |
 | `benchAutoUpdate` | `true` | While fusion is ON, refresh the benchmark library from the OpenRouter models API at most once per day (stored in OpenCode storage; fail-safe keeps the previous snapshot). |
 | `reviewModel` | (none) | Shadow auto-review model. Falls back like `classifierModel` when unset. |
-| `autoReviewWeight` | `0` | Weight (0..1) of the independent-audit auto-review signal inside the routing quality term. `0` = shadow display only. Set with `/fusion-audit`. |
+| `autoReviewWeight` | `0` | Weight (0..1) of the independent-audit auto-review signal inside the routing quality term. `0` = shadow display only. Set with `/fusion-params` (`audit`). |
 | `topologyMode` | `auto` | `auto` (Jev/observed stats) or `fixed` (single only). |
 | `allowedTopologies` | `["single","router","sequential-chain"]` | Whitelist of orchestration shapes. |
 | `maxTopologyCalls` | `4` | Upper bound of auxiliary calls per response (cost guard). |
@@ -333,7 +331,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `tiers` | all empty | Per-tier groups `{ heavy: [], middle: [], light: [] }` of `provider/model` refs. |
 | `variantMode` | `auto` | Reasoning-effort (thinking level) selection. `auto` = **model first, then variant**: the effort level (0 low / 1 medium / 2 high) is asked from Jev in the same round trip as task classification (legacy LLM classifier or the load band as fallback), then compensated against the chosen model's weight class — matched pairs keep the provider default, a task heavier than the model compensates up, a task lighter than the model drops for cost. Model class comes from the tier lists (manual/auto) or the benchmark overall score. `fixed` = always `variantFixed` when the model has it. `off` never touches the variant. |
 | `variantFixed` | (none) | Variant forced when `variantMode=fixed` (e.g. `"high"`). Skipped for models that do not expose it. Set via `/fusion-variantmode`. |
-| `variantExploreRate` | `0.1` | ε-greedy exploration for variant selection: with this probability a non-computed variant is dispatched so alternatives accumulate observations. Per-(model, variant) ok-rates (`fusion/variant/*`, shown in `/fusion-stats`) can then upgrade the computed pick to an adjacent effort level with a clearly better observed success rate. |
+| `variantExploreRate` | `0.1` | ε-greedy exploration for variant selection: with this probability a non-computed variant is dispatched so alternatives accumulate observations. Selection then runs as a closed-loop bandit over the adjacent effort levels on per-(model, variant) ok-rates (`fusion/variant/*`, shown in `/fusion-stats`): a data-bearing neighbor (`count ≥ 2`) with a better rate takes over, and a computed pick performing below the neutral prior (repeated failures) demotes itself to an unobserved neighbor — a fixed hint cannot lock the session into a poorly performing effort. Ties keep the hint's pick. |
 | `jevMode` | `auto` | `auto` (enable when a key is found) / `off`. |
 | `lang` | `"ja"` | Display language of commands, stats and dialogs: `"ja"` (Japanese) or `"en"` (English). Per-install default via `options`; switch at runtime with `/fusion-lang`. |
 | `rescueAttemptsBeforeSwitch` | `3` | Rescue (after-fail): allow up to N consecutive transient failures before the session is moved to a healthy model. `session.retry.scheduled` events are not terminal failures; they keep the retry alive and only increase the attempt counter. Default 3, range 1..10. |
@@ -464,7 +462,7 @@ scores the response in the background. This never blocks the user-visible respon
 - **Storage:** separate from human ratings (`fusion/auto/...` globally and per
   category). Results are kept per model (latest 5).
 - **Mode:** since v1.0 the auditor can take part in routing when
-  `autoReviewWeight > 0` (set with `/fusion-audit`). Default is `0`: shadow
+  `autoReviewWeight > 0` (set with `/fusion-params` → `audit`). Default is `0`: shadow
   display only. When enabled, its scores mix only inside the quality term
   behind sample and divergence gates. See "How the routing score works" for
   the full gate list.

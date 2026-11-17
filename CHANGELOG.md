@@ -44,18 +44,30 @@
   (`variantEffortRank`, unknown ids mid), so provider-specific naming does not
   matter; a model with fewer than 2 variants is left untouched. Two
   anti-ossification mechanisms: ε-greedy exploration
-  (`variantExploreRate`, default 0.1) samples non-computed variants, and
-  per-(model, variant) ok-rates (`fusion/variant/*`, visible in
-  `/fusion-stats`) upgrade the computed pick to an adjacent effort level with
-  a clearly better observed success rate. `variantMode=fixed` (UI: select
+  (`variantExploreRate`, default 0.1) samples non-computed variants, and a
+  closed-loop bandit over the adjacent effort levels — per-(model, variant)
+  ok-rates (`fusion/variant/*`, visible in `/fusion-stats`; no-override
+  dispatches are recorded under the synthetic `#default`) compete with the
+  computed pick on Laplace-smoothed ok-rate, so a hint or band rule that
+  keeps producing failures demotes itself to an adjacent level and can never
+  lock the session into a poorly performing effort. `variantMode=fixed` (UI:
+  select
   in `/fusion-variantmode`, e.g. `high`) forces one variant for every
   same-provider dispatch where the model exposes it. The user's explicit
   variant (`ctrl+t`, agent config, session ref) always wins, and rescue
   switches keep the target model's default variant. Tune with
   `/fusion-params` (`varexplore`).
 - **`/fusion-params`**: `/fusion-weights` renamed — the editor now covers
-  non-weight knobs too (`topocalls`, `topo-prior`, `rescuattempts`). The old
-  `/fusion-weights` name keeps working as an alias.
+  non-weight knobs too (`topocalls`, `topo-prior`, `rescuattempts`,
+  `costin`/`costout`). The old `/fusion-weights` name keeps working as an
+  alias.
+- **Slash-command cleanup**: `/fusion-audit` and `/fusion-costcap` removed —
+  both are covered by `/fusion-params` (`audit`, `costin`/`costout`). The
+  command set is now 15 entries, each with a unique job: display
+  (`stats`, `config`, `lang`), routing control (`toggle`, `provider`,
+  `whitelist`), coefficient tuning (`params`), mode selectors
+  (`chainmode`, `variantmode`, `tiermode`), list/string editors (`tiers`,
+  `reviewmodel`, `jev-key`) and actions (`review`, `probe`, `reset`).
 
 ### Changed
 - Topology selection logs now carry the blended distribution and the selection

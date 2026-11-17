@@ -9,14 +9,12 @@
 // /fusion-config     Show the current configuration
 // /fusion-provider   Change the routing target provider
 // /fusion-whitelist  Edit the whitelist of routing candidate models
-// /fusion-costcap    Edit the input/output cost caps used when the whitelist is empty
 // /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
-//                    (/fusion-weights works as an alias)
+//                    (/fusion-weights works as an alias; includes cost caps and the former /fusion-audit)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
 // /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
 // /fusion-reviewmodel Set the model responsible for internal (shadow) review
-// /fusion-audit      Set the weight (0..1) of the audit auto-review in routing quality (0 = shadow display only)
 // /fusion-chainmode  Toggle sequential-chain auxiliary execution (plan injection) off/active
 // /fusion-tiermode   Toggle tier routing (Light/Middle/Heavy by load)
 // /fusion-tiers      Edit the model groups per tier (whitelist on steroids)
@@ -63,6 +61,26 @@ const WEIGHT_FIELDS: {
     sen: "cost penalty weight",
     ja: "コストペナルティの重み。大きいほど安いモデルを優先",
     en: "weight of the cost penalty; higher prefers cheaper models",
+  },
+  {
+    alias: "costin",
+    server: "maxInputCost",
+    min: 0,
+    max: 1000,
+    sja: "コスト上限: input",
+    sen: "cost cap: input",
+    ja: "input上限(USD/1Mトークン)。ホワイトリスト空時のみ適用。0 = 無料モデルのみ",
+    en: "input cap (USD/1M tokens), applied when the whitelist is empty; 0 = free models only",
+  },
+  {
+    alias: "costout",
+    server: "maxOutputCost",
+    min: 0,
+    max: 1000,
+    sja: "コスト上限: output",
+    sen: "cost cap: output",
+    ja: "output上限(USD/1Mトークン)。ホワイトリスト空時のみ適用。0 = 無料モデルのみ",
+    en: "output cap (USD/1M tokens), applied when the whitelist is empty; 0 = free models only",
   },
   {
     alias: "latency",
@@ -998,47 +1016,6 @@ export default Plugin.define({
           },
         },
         {
-          id: "fusion.costcap",
-          title: tr("adaptive-fusion: ホワイトリスト空時の入力/出力コスト上限を編集", "adaptive-fusion: edit cost caps used when the whitelist is empty"),
-          slash: { name: "fusion-costcap" },
-          run: async () => {
-            try {
-              const current = await fusion.config({}, { location: location() })
-              const currentMaxInput = current.config.maxInputCost ?? 0
-              const currentMaxOutput = current.config.maxOutputCost ?? 0
-              const input = await context.ui.dialog.prompt({
-                title: "adaptive-fusion cost cap",
-                placeholder: tr("input,output (USD/Mtoken) — 0,0で無料モデルのみ", "input,output (USD/Mtoken) — 0,0 means free models only"),
-                default: `${currentMaxInput},${currentMaxOutput}`,
-              })
-              if (input === undefined) return
-              const values = input.split(",").map((s) => Number(s.trim()))
-              if (values.length !== 2 || values.some((v) => !Number.isFinite(v) || v < 0)) {
-                context.ui.toast.show({
-                  message: tr("cost cap: input,output を 0 以上の数値で入力してください", "cost cap: enter input,output as numbers >= 0"),
-                  variant: "error",
-                })
-                return
-              }
-              const [maxInputCost, maxOutputCost] = values
-              const result = await fusion.config(
-                { update: { maxInputCost, maxOutputCost } },
-                { location: location() },
-              )
-              context.ui.toast.show({
-                message: `cost cap: input ${maxInputCost} / output ${maxOutputCost}`,
-                variant: "success",
-              })
-              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
-            } catch (error) {
-              context.ui.toast.show({
-                message: `fusion-costcap: ${errorText(error)}`,
-                variant: "error",
-              })
-            }
-          },
-        },
-        {
           id: "fusion.params",
           title: tr(
             "adaptive-fusion: ルーティング/トポロジーの重み係数を一括調整",
@@ -1091,47 +1068,6 @@ export default Plugin.define({
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-reviewmodel: ${errorText(error)}`,
-                variant: "error",
-              })
-            }
-          },
-        },
-        {
-          id: "fusion.audit",
-          title: tr("adaptive-fusion: 自動監査の重みを設定(0 = shadow表示のみ)", "adaptive-fusion: set the auto-review weight (0 = shadow display only)"),
-          slash: { name: "fusion-audit" },
-          run: async () => {
-            try {
-              const current = await fusion.config({}, { location: location() })
-              const currentW = current.config.autoReviewWeight ?? 0
-              const input = await context.ui.dialog.prompt({
-                title: "adaptive-fusion audit weight",
-                placeholder: tr("0..1 (0.2 など; 0 で無効)", "0..1 (e.g. 0.2; 0 disables it)"),
-                default: String(currentW),
-              })
-              if (input === undefined) return
-              const w = Number(input.trim())
-              if (!Number.isFinite(w) || w < 0 || w > 1) {
-                context.ui.toast.show({
-                  message: tr("auto review weight は 0..1 の数値で入力してください", "auto review weight must be a number from 0 to 1"),
-                  variant: "error",
-                })
-                return
-              }
-              const result = await fusion.config(
-                { update: { autoReviewWeight: w } },
-                { location: location() },
-              )
-              context.ui.toast.show({
-                message: w === 0
-                  ? tr("auto review weight: 0 (shadow 表示のみ)", "auto review weight: 0 (shadow display only)")
-                  : `auto review weight: ${w}`,
-                variant: "success",
-              })
-              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
-            } catch (error) {
-              context.ui.toast.show({
-                message: `fusion-audit: ${errorText(error)}`,
                 variant: "error",
               })
             }

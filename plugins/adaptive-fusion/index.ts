@@ -1742,9 +1742,11 @@ export default Plugin.define({
     // Two anti-ossification mechanisms sit on top:
     //   - ε-greedy exploration (variantExploreRate) samples non-computed
     //     variants so they accumulate observations
-    //   - per-(model,variant) ok-rate records (fusion/variant/*) can upgrade
-    //    the computed pick to an adjacent effort level with clearly better
-    //    observed success rate
+    //   - a closed-loop bandit over the adjacent effort levels: the computed
+    //     pick competes on observed ok-rate (Laplace-smoothed, unobserved =
+    //     neutral 0.5), so a hint or band rule that keeps producing failures
+    //     demotes itself to an adjacent level — it cannot lock the session
+    //     into a poorly performing effort
     const VARIANT_EFFORT_RANK: Record<string, number> = {
       none: 0,
       minimal: 0,
@@ -1853,12 +1855,15 @@ export default Plugin.define({
       ok: boolean,
       ms: number,
     ) => {
-      if (!variant) return
+      // Dispatches without an explicit variant (matched pair -> provider
+      // default) are recorded under the synthetic id "default" so the
+      // learning data covers the no-override choice as well.
+      const key = variant || "default"
       void (async () => {
         const saved =
-          (await loadVariantStat(providerID, modelID, variant)) ?? {
+          (await loadVariantStat(providerID, modelID, key)) ?? {
             model: { providerID, id: modelID },
-            variant,
+            variant: key,
             count: 0,
             ok: 0,
             totalMs: 0,
@@ -1870,7 +1875,7 @@ export default Plugin.define({
         saved.updatedAt = new Date().toISOString()
         await saveVariantStat(saved)
         logRoute(
-          `VARIANT obs ${providerID}/${modelID}#${variant} ${ok ? "ok" : "fail"} (${saved.ok}/${saved.count})`,
+          `VARIANT obs ${providerID}/${modelID}#${key} ${ok ? "ok" : "fail"} (${saved.ok}/${saved.count})`,
         )
       })()
     }
@@ -1921,20 +1926,35 @@ export default Plugin.define({
               ? Math.max(0, Math.ceil(ranked.length / 2) - 1)
               : 0
         let pos = computedPos
-        // Learned upgrade: an adjacent effort level with a clearly better
-        // observed ok-rate (>=3 observations) replaces the computed pick.
+        // v1.1: closed-loop learning (anti-ossification). The computed pick
+        // does not just get "upgraded" when a neighbor is better — it
+        // competes with its adjacent effort levels on observed ok-rate
+        // (Laplace-smoothed, unobserved = neutral 0.5). A computed variant
+        // performing below the neutral prior (repeated failures) demotes
+        // itself to an unobserved adjacent level, so a fixed Jev/LLM hint can
+        // never lock the session into a poorly performing effort: the loop
+        // escapes through the data. Ties keep the computed pick (no churn).
         const base = await loadVariantStat(providerID, modelID, ranked[pos].id)
         let bestScore = variantOkScore(base)
-        for (const j of [pos - 1, pos + 1]) {
+        for (const j of [computedPos - 1, computedPos + 1]) {
           if (j < 0 || j >= ranked.length) continue
           const neighbor = await loadVariantStat(
             providerID,
             modelID,
             ranked[j].id,
           )
-          if (!neighbor || neighbor.count < 3) continue
-          const score = variantOkScore(neighbor)
-          if (score >= bestScore + 0.1) {
+          const score = variantOkScore(neighbor) // unobserved = 0.5
+          // Two ways a neighbor may take over:
+          //  - evidence: 2+ observations with a better ok-rate beat the pick
+          //    (a single lucky ε sample must not churn it away)
+          //  - escape: an unobserved neighbor rescues a pick performing below
+          //    the neutral prior (repeated failures) — the loop stays closed
+          //    even when no alternative has been sampled yet
+          const compete =
+            neighbor && neighbor.count >= 2
+              ? score > bestScore
+              : !neighbor && bestScore < 0.5
+          if (compete) {
             pos = j
             bestScore = score
           }
@@ -1942,7 +1962,7 @@ export default Plugin.define({
         const picked = ranked[pos]
         return {
           variant: picked.id,
-          note: `level ${level} of cls=${cls ?? "?"}${pos !== computedPos ? " learned" : ""}`,
+          note: `level ${level} of cls=${cls ?? "?"}${pos !== computedPos ? ` learned ok=${(bestScore * 100).toFixed(0)}%` : ""}`,
         }
       } catch {
         return { note: "catalog unavailable" }

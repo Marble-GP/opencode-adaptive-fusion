@@ -398,6 +398,42 @@ check("unknown ids rank mid", pickOf(["fast", "turbo", "ultra"], 2), "ultra");
 check("unknown ids level 0", pickOf(["fast", "turbo", "ultra"], 0), "fast");
 check("stable order for ties", pickOf(["a", "b", "c", "d"], 0), "a");
 
+// --- Closed-loop variant bandit (mirror of the neighbor competition) ---
+// The computed pick competes on Laplace-smoothed ok-rate with adjacent effort
+// levels: data-bearing neighbors (count >= 2) with a better rate take over;
+// an unobserved neighbor rescues a pick performing below neutral (0.5);
+// ties keep the computed pick.
+const variantOkScore = (stat) => (stat && stat.count > 0 ? (stat.ok + 1) / (stat.count + 2) : 0.5);
+const variantBanditPos = (stats, computedPos, len) => {
+  let pos = computedPos;
+  let bestScore = variantOkScore(stats[computedPos]);
+  for (const j of [computedPos - 1, computedPos + 1]) {
+    if (j < 0 || j >= len) continue;
+    const neighbor = stats[j];
+    const score = variantOkScore(neighbor);
+    const compete =
+      neighbor && neighbor.count >= 2
+        ? score > bestScore
+        : !neighbor && bestScore < 0.5;
+    if (compete) {
+      pos = j;
+      bestScore = score;
+    }
+  }
+  return pos;
+};
+const S = (ok, count) => ({ ok, count });
+check("bandit: all unobserved keeps computed", variantBanditPos([undefined, undefined, undefined], 1, 3), 1);
+check("bandit: bad pick escapes to unobserved left", variantBanditPos([undefined, S(0, 3), undefined], 1, 3), 0);
+check("bandit: bad pick escapes left", variantBanditPos([undefined, S(0, 3), undefined], 1, 3), 0);
+check("bandit: neutral pick not stolen by unobserved", variantBanditPos([undefined, undefined, undefined], 1, 3), 1);
+check("bandit: single lucky sample does not churn", variantBanditPos([S(1, 1), undefined, undefined], 1, 3), 1);
+check("bandit: 2/2 evidence beats neutral", variantBanditPos([S(2, 2), undefined, undefined], 1, 3), 0);
+check("bandit: 1/3 evidence loses to unobserved pick", variantBanditPos([S(1, 3), undefined, undefined], 1, 3), 1);
+check("bandit: good pick keeps despite 2/2 neighbor", variantBanditPos([S(2, 2), S(4, 4), undefined], 1, 3), 1);
+check("bandit: boundary pos 0 escapes right", variantBanditPos([S(0, 3), undefined, undefined], 0, 3), 1);
+check("bandit: boundary pos 2 escapes left", variantBanditPos([undefined, undefined, S(0, 3)], 2, 3), 1);
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);
