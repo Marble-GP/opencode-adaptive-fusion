@@ -10,7 +10,8 @@
 // /fusion-provider   Change the routing target provider
 // /fusion-whitelist  Edit the whitelist of routing candidate models
 // /fusion-costcap    Edit the input/output cost caps used when the whitelist is empty
-// /fusion-weights    Adjust routing/topology weights (presets + combobox editor with descriptions)
+// /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
+//                    (/fusion-weights works as an alias)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
 // /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
@@ -37,7 +38,7 @@ const errorText = (error: unknown): string => {
 
 // Tunable weights/coefficients of the routing and topology scores (v1.0).
 // These are adjustable server-side via the config RPC but had no TUI surface;
-// /fusion-weights edits them in one place. Aliases, validation ranges, and
+// /fusion-params edits them in one place. Aliases, validation ranges, and
 // localized help descriptions (shown in the picker and the edit prompt).
 const WEIGHT_FIELDS: {
   alias: string
@@ -199,7 +200,7 @@ const WEIGHT_FIELDS: {
   },
 ]
 
-// Presets for /fusion-weights (select option -> partial update).
+// Presets for /fusion-params (select option -> partial update).
 const WEIGHT_PRESETS: Record<string, Record<string, number>> = {
   balanced: {
     costWeight: 0.1,
@@ -243,6 +244,8 @@ type FusionConfig = {
   topologyPriorStrength?: number
   // v1.1: rescue (after-fail) switch: allow up to N consecutive transient failures before the session is moved to a healthy model.
   rescueAttemptsBeforeSwitch?: number
+  // v1.1: reasoning-effort (variant) auto-selection (off/auto)
+  variantMode?: "off" | "auto"
   chainMode?: "off" | "active"
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
@@ -271,6 +274,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
+    `variant       : ${c.variantMode === "off" ? T("off (effort/thinking は変更しない)", "off (never touch effort/thinking)") : T("auto (負荷帯に応じた #variant 自動選択, 明示指定は優先)", "auto (pick #variant by load band; explicit choice wins)")}`,
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
@@ -737,6 +741,164 @@ export default Plugin.define({
       )
     }
 
+    // /fusion-params (v1.1: renamed from /fusion-weights): presets + custom
+    // coefficient editor. Defined once; /fusion-weights reuses it as an alias.
+    async function fusionParamsDialog() {
+      try {
+        const current = await fusion.config({}, { location: location() })
+        const c = current.config
+        const choice = await context.ui.dialog.select({
+          title: "adaptive-fusion params",
+          current: "balanced",
+          options: [
+            {
+              title: "balanced",
+              value: "balanced",
+              category: tr("プリセット", "presets"),
+              description: tr("既定のバランス", "default balance"),
+            },
+            {
+              title: "cost-first",
+              value: "cost-first",
+              description: tr("コスト重視", "cost matters most"),
+            },
+            {
+              title: "quality-first",
+              value: "quality-first",
+              description: tr("品質重視(コスト弱め)", "weaker cost penalty"),
+            },
+            {
+              title: "snappy",
+              value: "snappy",
+              description: tr("速度重視", "latency first"),
+            },
+            {
+              title: "audit-on",
+              value: "audit-on",
+              description: tr("監査重み 0.2", "audit weight 0.2"),
+            },
+            {
+              title: "custom",
+              value: "custom",
+              category: tr("編集", "edit"),
+              description: tr("係数を検索して編集", "search and edit coefficients"),
+            },
+          ],
+        })
+        if (!choice) return
+        if (choice !== "custom") {
+          const update = WEIGHT_PRESETS[choice]
+          const result = await fusion.config(
+            { update },
+            { location: location() },
+          )
+          context.ui.toast.show({
+            message: `params: ${choice}`,
+            variant: "success",
+          })
+          showLongText(
+            "adaptive-fusion config",
+            formatConfig(result.config, lang() === "en"),
+          )
+          return
+        }
+        // Custom = combobox (v1.0). A single native combobox widget is
+        // not available in the dialog API, so compose a searchable
+        // select with per-option descriptions (type-to-filter, help
+        // text shown by the host without cluttering the list) with a
+        // prompt prefilled with the current value per field. Editing
+        // loops back to the list; Esc finishes.
+        {
+          let cur: FusionConfig = c
+          for (;;) {
+            const picked = await context.ui.dialog.select({
+              title: tr(
+                "編集する係数を選択(Esc で終了)",
+                "Pick a coefficient to edit (Esc to finish)",
+              ),
+              options: WEIGHT_FIELDS.map((f) => ({
+                title: `${f.alias} = ${(cur as any)[f.server] ?? "-"}`,
+                value: f.alias,
+                // One-line help: kept short so each row stays on one
+                // line (the host renders title + description inline).
+                description: tr(
+                  `${f.sja}(${f.min}〜${f.max}${f.integer ? "・整数" : ""})`,
+                  `${f.sen} (${f.min}..${f.max}${f.integer ? ", integer" : ""})`,
+                ),
+              })),
+              // Match aliases and description words (e.g. "topo" or "コスト")
+              search: (query, options) =>
+                options.filter(
+                  (o) =>
+                    o.title.toLowerCase().includes(query.toLowerCase()) ||
+                    (o.description ?? "")
+                      .toLowerCase()
+                      .includes(query.toLowerCase()),
+                ),
+              // Full help on demand, without cluttering the list
+              actions: [
+                {
+                  bind: "ctrl+h",
+                  title: tr("help", "help"),
+                  onTrigger: (value) => {
+                    const f = WEIGHT_FIELDS.find((x) => x.alias === value)
+                    if (!f) return
+                    context.ui.toast.show({
+                      title: `adaptive-fusion: ${f.alias}`,
+                      message: tr(f.ja, f.en),
+                      duration: 8000,
+                    })
+                  },
+                },
+              ],
+            })
+            if (!picked) break
+            const field = WEIGHT_FIELDS.find((f) => f.alias === picked)
+            if (!field) break
+            const help = tr(field.sja, field.sen)
+            const range = tr(
+              `${field.min}〜${field.max}${field.integer ? "・整数" : ""}`,
+              `${field.min}..${field.max}${field.integer ? ", integer" : ""}`,
+            )
+            const input = await context.ui.dialog.prompt({
+              title: `adaptive-fusion params: ${field.alias}`,
+              // Description shown while editing too
+              placeholder: `${help} — ${range}`,
+              default: String((cur as any)[field.server] ?? ""),
+            })
+            if (input === undefined) continue
+            const num = Number(input.trim())
+            if (!Number.isFinite(num) || num < field.min || num > field.max) {
+              context.ui.toast.show({
+                message: tr(
+                  `${field.alias} は ${field.min}〜${field.max} の数値で入力してください`,
+                  `${field.alias} must be a number from ${field.min} to ${field.max}`,
+                ),
+                variant: "error",
+              })
+              continue
+            }
+            const value = field.integer ? Math.floor(num) : num
+            const result = await fusion.config(
+              { update: { [field.server]: value } },
+              { location: location() },
+            )
+            cur = result.config
+            context.ui.toast.show({
+              message: `params: ${field.alias} = ${value}`,
+              variant: "success",
+            })
+          }
+          return
+        }
+      } catch (error) {
+        context.ui.toast.show({
+          message: `fusion-params: ${errorText(error)}`,
+          variant: "error",
+        })
+      }
+    }
+
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -863,172 +1025,23 @@ export default Plugin.define({
           },
         },
         {
-          id: "fusion.weights",
+          id: "fusion.params",
           title: tr(
             "adaptive-fusion: ルーティング/トポロジーの重み係数を一括調整",
             "adaptive-fusion: batch-adjust routing/topology weights",
           ),
+          slash: { name: "fusion-params" },
+          run: () => fusionParamsDialog(),
+        },
+        {
+          // v1.1: legacy alias kept for muscle memory; identical behavior.
+          id: "fusion.weights",
+          title: tr(
+            "adaptive-fusion: 重み係数を一括調整 (/fusion-params と同じ)",
+            "adaptive-fusion: batch-adjust weights (same as /fusion-params)",
+          ),
           slash: { name: "fusion-weights" },
-          run: async () => {
-            try {
-              const current = await fusion.config({}, { location: location() })
-              const c = current.config
-              const choice = await context.ui.dialog.select({
-                title: "adaptive-fusion weights",
-                current: "balanced",
-                options: [
-                  {
-                    title: "balanced",
-                    value: "balanced",
-                    category: tr("プリセット", "presets"),
-                    description: tr("既定のバランス", "default balance"),
-                  },
-                  {
-                    title: "cost-first",
-                    value: "cost-first",
-                    description: tr("コスト重視", "cost matters most"),
-                  },
-                  {
-                    title: "quality-first",
-                    value: "quality-first",
-                    description: tr("品質重視(コスト弱め)", "weaker cost penalty"),
-                  },
-                  {
-                    title: "snappy",
-                    value: "snappy",
-                    description: tr("速度重視", "latency first"),
-                  },
-                  {
-                    title: "audit-on",
-                    value: "audit-on",
-                    description: tr("監査重み 0.2", "audit weight 0.2"),
-                  },
-                  {
-                    title: "custom",
-                    value: "custom",
-                    category: tr("編集", "edit"),
-                    description: tr(
-                      "係数を検索して編集",
-                      "search and edit coefficients",
-                    ),
-                  },
-                ],
-              })
-              if (!choice) return
-              if (choice !== "custom") {
-                const update = WEIGHT_PRESETS[choice]
-                const result = await fusion.config(
-                  { update },
-                  { location: location() },
-                )
-                context.ui.toast.show({
-                  message: `weights: ${choice}`,
-                  variant: "success",
-                })
-                showLongText(
-                  "adaptive-fusion config",
-                  formatConfig(result.config, lang() === "en"),
-                )
-                return
-              }
-              // Custom = combobox (v1.0). A single native combobox widget is
-              // not available in the dialog API, so compose a searchable
-              // select with per-option descriptions (type-to-filter, help
-              // text shown by the host without cluttering the list) with a
-              // prompt prefilled with the current value per field. Editing
-              // loops back to the list; Esc finishes.
-              {
-                let cur: FusionConfig = c
-                for (;;) {
-                  const picked = await context.ui.dialog.select({
-                    title: tr(
-                      "編集する係数を選択(Esc で終了)",
-                      "Pick a coefficient to edit (Esc to finish)",
-                    ),
-                    options: WEIGHT_FIELDS.map((f) => ({
-                      title: `${f.alias} = ${(cur as any)[f.server] ?? "-"}`,
-                      value: f.alias,
-                      // One-line help: kept short so each row stays on one
-                      // line (the host renders title + description inline).
-                      description: tr(
-                        `${f.sja}(${f.min}〜${f.max}${f.integer ? "・整数" : ""})`,
-                        `${f.sen} (${f.min}..${f.max}${f.integer ? ", integer" : ""})`,
-                      ),
-                    })),
-                    // Match aliases and description words (e.g. "topo" or "コスト")
-                    search: (query, options) =>
-                      options.filter(
-                        (o) =>
-                          o.title.toLowerCase().includes(query.toLowerCase()) ||
-                          (o.description ?? "")
-                            .toLowerCase()
-                            .includes(query.toLowerCase()),
-                      ),
-                    // Full help on demand, without cluttering the list
-                    actions: [
-                      {
-                        bind: "ctrl+h",
-                        title: tr("help", "help"),
-                        onTrigger: (value) => {
-                          const f = WEIGHT_FIELDS.find(
-                            (x) => x.alias === value,
-                          )
-                          if (!f) return
-                          context.ui.toast.show({
-                            title: `adaptive-fusion: ${f.alias}`,
-                            message: tr(f.ja, f.en),
-                            duration: 8000,
-                          })
-                        },
-                      },
-                    ],
-                  })
-                  if (!picked) break
-                  const field = WEIGHT_FIELDS.find((f) => f.alias === picked)
-                  if (!field) break
-                  const help = tr(field.sja, field.sen)
-                  const range = tr(
-                    `${field.min}〜${field.max}${field.integer ? "・整数" : ""}`,
-                    `${field.min}..${field.max}${field.integer ? ", integer" : ""}`,
-                  )
-                  const input = await context.ui.dialog.prompt({
-                    title: `adaptive-fusion weights: ${field.alias}`,
-                    // Description shown while editing too
-                    placeholder: `${help} — ${range}`,
-                    default: String((cur as any)[field.server] ?? ""),
-                  })
-                  if (input === undefined) continue
-                  const num = Number(input.trim())
-                  if (!Number.isFinite(num) || num < field.min || num > field.max) {
-                    context.ui.toast.show({
-                      message: tr(
-                        `${field.alias} は ${field.min}〜${field.max} の数値で入力してください`,
-                        `${field.alias} must be a number from ${field.min} to ${field.max}`,
-                      ),
-                      variant: "error",
-                    })
-                    continue
-                  }
-                  const value = field.integer ? Math.floor(num) : num
-                  const result = await fusion.config(
-                    { update: { [field.server]: value } },
-                    { location: location() },
-                  )
-                  cur = result.config
-                  context.ui.toast.show({
-                    message: `weights: ${field.alias} = ${value}`,
-                    variant: "success",
-                  })
-                }
-                return
-              }
-            } catch (error) {
-              context.ui.toast.show({
-                message: `fusion-weights: ${errorText(error)}`,
-                variant: "error",
-              })
-            }
-          },
+          run: () => fusionParamsDialog(),
         },
         {
           id: "fusion.reviewmodel",
@@ -1105,6 +1118,33 @@ export default Plugin.define({
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-audit: ${errorText(error)}`,
+                variant: "error",
+              })
+            }
+          },
+        },
+        {
+          id: "fusion.variantmode",
+          title: tr("adaptive-fusion: reasoning effort(thinking レベル)の自動選択を切替", "adaptive-fusion: cycle reasoning-effort (thinking level) auto-selection"),
+          slash: { name: "fusion-variantmode" },
+          run: async () => {
+            try {
+              const current = await fusion.config({}, { location: location() })
+              const next = current.config.variantMode === "off" ? "auto" : "off"
+              const result = await fusion.config(
+                { update: { variantMode: next } },
+                { location: location() },
+              )
+              context.ui.toast.show({
+                message:
+                  result.config.variantMode === "auto"
+                    ? tr("variant: auto(負荷帯に応じて #variant を選択 / 明示指定は優先)", "variant: auto (pick #variant by load band; explicit choice wins)")
+                    : tr("variant: off(effort/thinking は変更しない)", "variant: off (never touch effort/thinking)"),
+                variant: "success",
+              })
+            } catch (error) {
+              context.ui.toast.show({
+                message: `fusion-variantmode: ${errorText(error)}`,
                 variant: "error",
               })
             }

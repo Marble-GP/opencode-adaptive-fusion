@@ -341,6 +341,43 @@ check(
   1,
 );
 
+// --- Variant (reasoning-effort) selection (mirror of pickVariantIndex) ---
+// Positional over the model's own variant list ranked by an effort scale:
+// light -> lowest, middle -> median, heavy -> highest; unknown ids rank mid.
+const VARIANT_EFFORT_RANK = {
+  none: 0,
+  minimal: 0,
+  low: 1,
+  medium: 2,
+  med: 2,
+  high: 3,
+  xhigh: 4,
+  max: 5,
+  thinking: 3,
+  reasoning: 3,
+};
+const variantEffortRank = (id) => VARIANT_EFFORT_RANK[id.toLowerCase()] ?? 2;
+const pickVariantIndex = (variants, load) => {
+  if (!Array.isArray(variants) || variants.length < 2) return -1;
+  const ranked = variants
+    .map((v, i) => ({ rank: variantEffortRank(String(v)), i }))
+    .sort((a, b) => a.rank - b.rank);
+  if (load === "heavy") return ranked[ranked.length - 1].i;
+  if (load === "middle")
+    return ranked[Math.max(0, Math.ceil(ranked.length / 2) - 1)].i;
+  return ranked[0].i;
+};
+const pickOf = (list, load) => (pickVariantIndex(list, load) >= 0 ? list[pickVariantIndex(list, load)] : undefined);
+check("no variants -> no pick", pickOf(["high"], "heavy"), undefined);
+check("light picks lowest effort", pickOf(["low", "medium", "high"], "light"), "low");
+check("middle picks median", pickOf(["low", "medium", "high"], "middle"), "medium");
+check("heavy picks highest effort", pickOf(["low", "medium", "high"], "heavy"), "high");
+check("even count middle picks lower median", pickOf(["high", "max"], "middle"), "high");
+check("openai scale heavy", pickOf(["none", "minimal", "low", "medium", "high", "xhigh"], "heavy"), "xhigh");
+check("unknown ids rank mid", pickOf(["fast", "turbo", "ultra"], "heavy"), "ultra");
+check("unknown ids light", pickOf(["fast", "turbo", "ultra"], "light"), "fast");
+check("stable order for ties", pickOf(["a", "b", "c", "d"], "light"), "a");
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);

@@ -257,7 +257,7 @@ defaults only.
 
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
-| `/fusion-weights` | Batch-adjusts the thirteen routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
+| `/fusion-params` | Batch-adjust the thirteen routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. `/fusion-weights` still works as an alias. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
 | `/fusion-audit` | Sets the weight of the independent audit signal inside the routing quality term. `0` = shadow display only; `0.2` is typical when enabling it. Routing use stays behind gates: N ≥ 10 samples, quality axes only, and the weight is halved when audit vs human scores diverge by \|Δ\| ≥ 1.0. | `autoReviewWeight` (0..1) |
 | `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
 
@@ -266,6 +266,7 @@ defaults only.
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
 | `/fusion-chainmode` | Toggles sequential-chain planning injection `off ↔ active`. | `chainMode` — `off` decides and records the shape only; `active` injects the planner plan on chain turns. |
+| `/fusion-variantmode` | Toggles reasoning-effort (thinking level) auto-selection `off ↔ auto`. `auto` picks the model's `#variant` by the task's load band (light → lowest effort, heavy → highest) on every dispatch; an explicit variant choice (`ctrl+t`, agent config) always wins. | `variantMode` — applies only while routing is ON and only to same-provider dispatches; rescue switches keep the target model's default variant. |
 | `/fusion-tiermode` | Cycles tier routing `off → manual → auto`. | `tierMode` — `manual` uses the groups from `/fusion-tiers`; `auto` trisects candidates by benchmark score. |
 | `/fusion-tiers` | Edits the Heavy / Middle / Light model groups (comma-separated `provider/model` refs). | `tiers` — empty input keeps the current group; enable the result with `/fusion-tiermode manual`. |
 
@@ -330,6 +331,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `chainMode` | `off` | `active` injects a planner-generated plan (8 s timeout) as reference context for sequential-chain turns. |
 | `tierMode` | `off` | `off` / `manual` (user-defined tiers) / `auto` (split candidates by benchmark score). |
 | `tiers` | all empty | Per-tier groups `{ heavy: [], middle: [], light: [] }` of `provider/model` refs. |
+| `variantMode` | `auto` | Reasoning-effort (thinking level) auto-selection. `auto` picks the dispatched model's `#variant` (e.g. `#low`/`#high`/`#max`) by the task's load band — light → lowest effort, middle → median, heavy → highest — without overriding an explicit variant choice. `off` never touches the variant. |
 | `jevMode` | `auto` | `auto` (enable when a key is found) / `off`. |
 | `lang` | `"ja"` | Display language of commands, stats and dialogs: `"ja"` (Japanese) or `"en"` (English). Per-install default via `options`; switch at runtime with `/fusion-lang`. |
 | `rescueAttemptsBeforeSwitch` | `3` | Rescue (after-fail): allow up to N consecutive transient failures before the session is moved to a healthy model. `session.retry.scheduled` events are not terminal failures; they keep the retry alive and only increase the attempt counter. Default 3, range 1..10. |
@@ -671,7 +673,7 @@ automatically — but never silently:
 | v0.8.1 | Verified cooldowns, DEFER path, merge persistence, pre-prompt rescue | Released |
 | **v0.9.0** | Retroactive review, turn statistics, results enumeration, efficiency axis | **Released** |
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
-| **v1.0** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, `/fusion-weights` editor, benchmark library auto-refresh | **Released** |
+| **v1.0** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, `/fusion-weights` editor (renamed `/fusion-params` in v1.1), benchmark library auto-refresh | **Released** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation | Planned |
 | v1.0+ | test harness, comparative experiments | Planned |

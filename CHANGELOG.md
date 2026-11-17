@@ -28,14 +28,27 @@
   attempt counter in sync and never switch models. Definitive signals
   (`Model unavailable`, quota) still rescue immediately because retrying them
   cannot succeed. Configurable via plugin options, the config RPC, and
-  `/fusion-weights` (`rescuattempts`).
+  `/fusion-params` (`rescuattempts`).
+- **Reasoning-effort (thinking level) auto-selection (`variantMode`, default
+  `auto`)**: on every same-provider dispatch, fusion picks the model's own
+  `#variant` by the task's load band — light → lowest effort, middle →
+  median, heavy → highest (`variantEffortRank` scale with unknown ids ranked
+  mid; a model with fewer than 2 variants is left untouched). The user's
+  explicit variant (`ctrl+t`, agent config, session ref) always wins, and
+  rescue switches keep the target model's default variant. Toggle with
+  `/fusion-variantmode`.
+- **`/fusion-params`**: `/fusion-weights` renamed — the editor now covers
+  non-weight knobs too (`topocalls`, `topo-prior`, `rescuattempts`). The old
+  `/fusion-weights` name keeps working as an alias.
 
 ### Changed
 - Topology selection logs now carry the blended distribution and the selection
   trace (`heuristic` / `blend` / `explore`) in `/fusion-stats`'s route log
   instead of only `TOPOLOGY single`.
 - Route log now records the wait-for-retry decision (`WAIT ... attempt n/N`,
-  `RETRY ... attempt n/N (no switch)`) so switch storms are diagnosable.
+  `RETRY ... attempt n/N (no switch)`) so switch storms are diagnosable, and
+  the variant choice as `VARIANT <kind> <ref> -> #<id> (load=<band>)` /
+  `ROUTE ... <ref>#<variant>` when effort auto-selection is active.
 
 ### Fixed
 - Frequent "Switched model to ..." churn: the after-fail event handler

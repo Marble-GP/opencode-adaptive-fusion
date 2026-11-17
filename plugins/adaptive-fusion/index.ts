@@ -3,6 +3,7 @@
 // Prototype corresponding to Phase1 + Phase2 (task classification) of the proposal.
 //  - The prompt hook classifies tasks (using ctx.experimental.generate.text) and keeps the result per session
 //  - The experimental.model.resolve hook swaps models based on per-task-category x model learned scores
+//    v1.1: it also selects the reasoning-effort variant (#low/#high/#max...) matching the task's load band
 //  - The http.request / http.response hooks collect latency and success/failure, persisted to ctx.storage
 //  - RPC provides stats display / config changes / reset to the TUI part (tui.tsx)
 //
@@ -239,6 +240,13 @@ type FusionConfig = {
   // Tier routing (v0.8, load-based selection à la Copilot Fusion / HydraFusion).
   // off = legacy behavior / manual = user-defined tiers / auto = derived by trisecting the benchmark
   tierMode: "off" | "manual" | "auto"
+  // Reasoning-effort (thinking level) auto-selection (v1.1). OpenCode models can
+  // expose named variants (#low/#high/#max...) that switch request settings such
+  // as reasoningEffort / thinking budget. auto = pick the variant matching the
+  // task's load band (light -> lowest effort, heavy -> highest) for every
+  // dispatch; the user's explicit variant choice (ctrl+t / agent config) always
+  // wins. off = never touch the variant.
+  variantMode: "off" | "auto"
   // Model groups per tier (an enhanced whitelist).
   // Each tier can hold multiple provider/model entries; within a tier, the existing statScore+exploration applies.
   tiers: { heavy: string[]; middle: string[]; light: string[] }
@@ -395,6 +403,9 @@ export default Plugin.define({
         return raw === "manual" || raw === "auto" || raw === "off" ? raw : "off"
       })(),
       tiers: sanitizeTiers(ctx.options.tiers),
+      // Reasoning-effort (variant) auto-selection. "auto" applies the variant
+      // matching the load band unless the session/agent already picked one.
+      variantMode: ctx.options.variantMode === "off" ? "off" : "auto",
       // Display language. Can be chosen per install via opencode.json options.lang
       // (same saved-settings > options priority as other items).
       lang: ctx.options.lang === "en" ? "en" : "ja",
@@ -488,6 +499,8 @@ export default Plugin.define({
         cfg.tierMode = s.tierMode
       if (s.tiers && typeof s.tiers === "object")
         cfg.tiers = sanitizeTiers(s.tiers)
+      if (s.variantMode === "off" || s.variantMode === "auto")
+        cfg.variantMode = s.variantMode
       if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
       if (typeof s.autoReviewWeight === "number")
         cfg.autoReviewWeight = clamp(s.autoReviewWeight, 0, 1)
@@ -1674,6 +1687,61 @@ export default Plugin.define({
       logRoute(
         `LOAD ${load}${raw === undefined ? "" : `(${Math.round(raw)})`} via ${source}`,
       )
+    }
+
+    // ------------------------------------------------------------------
+    // Reasoning-effort (variant) auto-selection (v1.1)
+    // ------------------------------------------------------------------
+    // OpenCode models expose named variants ("#low", "#high", "#max", ...)
+    // that switch request settings such as reasoningEffort / thinking budget.
+    // The variant ids are provider-specific, so selection is positional over
+    // the model's own variant list ranked by an effort scale, not by name:
+    // light -> lowest effort, middle -> median, heavy -> highest.
+    const VARIANT_EFFORT_RANK: Record<string, number> = {
+      none: 0,
+      minimal: 0,
+      low: 1,
+      medium: 2,
+      med: 2,
+      high: 3,
+      xhigh: 4,
+      max: 5,
+      thinking: 3,
+      reasoning: 3,
+    }
+    const variantEffortRank = (id: string) =>
+      VARIANT_EFFORT_RANK[id.toLowerCase()] ?? 2
+
+    // Pure helper (mirrored in tests): pick the variant index for the band.
+    // Returns undefined when there is nothing meaningful to pick (0-1 variants).
+    const pickVariantIndex = (variants: string[], load: TierName) => {
+      if (!Array.isArray(variants) || variants.length < 2) return -1
+      const ranked = variants
+        .map((v, i) => ({ rank: variantEffortRank(String(v)), i }))
+        .sort((a, b) => a.rank - b.rank)
+      if (load === "heavy") return ranked[ranked.length - 1].i
+      if (load === "middle")
+        return ranked[Math.max(0, Math.ceil(ranked.length / 2) - 1)].i
+      return ranked[0].i
+    }
+
+    // Resolve the model's variant list and return the load-matched variant id,
+    // or undefined when the model has no meaningful variant choice.
+    const variantForLoad = async (
+      providerID: string,
+      modelID: string,
+      load: TierName | undefined,
+    ): Promise<string | undefined> => {
+      try {
+        const info: any = await (ctx.model as any).get(providerID, modelID)
+        const ids: string[] = ((info?.variants ?? []) as any[])
+          .map((v) => (typeof v === "string" ? v : v?.id))
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+        const index = pickVariantIndex(ids, load ?? "middle")
+        return index >= 0 ? ids[index] : undefined
+      } catch {
+        return undefined
+      }
     }
 
     const saveReviewAssignment = async (sessionID: string, category: string) => {
@@ -3814,6 +3882,24 @@ export default Plugin.define({
       // (Free-tier models remain enabled in the catalog but resolve becomes impossible,
       //  so detection is based on failure history = cooldown)
       const rescue = cool(currentRef)
+      // v1.1: reasoning-effort (variant) auto-selection for THIS dispatch.
+      // Applied before the routing pick so the KEEP path (same model, tuned
+      // effort) also benefits. The session/agent's explicit variant always
+      // wins; rescue switches keep the target model's default variant.
+      if (cfg.variantMode === "auto" && !rescue && !event.model.variant) {
+        const load = sessionLoad.get(event.sessionID)
+        const variant = await variantForLoad(
+          event.model.providerID,
+          event.model.id,
+          load,
+        )
+        if (variant) {
+          event.model = { ...event.model, variant }
+          logRoute(
+            `VARIANT ${event.kind} ${currentRef} -> #${variant} (load=${load ?? "?"}, auto)`,
+          )
+        }
+      }
       const choice = await pick(
         currentRef,
         sessionCategory.get(event.sessionID),
@@ -3836,9 +3922,27 @@ export default Plugin.define({
       // and cross-provider fallback happens via switchModel (the same path as manual model selection)
       // by updating the session model so the next dispatch uses it.
       if (choice.providerID === event.model.providerID) {
-        event.model = { providerID: choice.providerID, id: choice.id }
+        // Keep the variant decided above (or the routed model's own best fit
+        // when the routed model differs from the current one).
+        let variant = event.model.variant
+        if (
+          cfg.variantMode === "auto" &&
+          !variant &&
+          choice.id !== event.model.id
+        ) {
+          variant = await variantForLoad(
+            choice.providerID,
+            choice.id,
+            sessionLoad.get(event.sessionID),
+          )
+        }
+        event.model = {
+          providerID: choice.providerID,
+          id: choice.id,
+          ...(variant ? { variant } : {}),
+        }
         logRoute(
-          `ROUTE ${event.kind} ${currentRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
+          `ROUTE ${event.kind} ${currentRef} -> ${choice.providerID}/${choice.id}${variant ? `#${variant}` : ""} (${choice.reason})`,
         )
         // Persist the routing result into the session's saved model as well (v0.8.1 fix).
         // resolve swaps are per-dispatch; the saved model remains the original.
@@ -4809,6 +4913,7 @@ export default Plugin.define({
       )
         cfg.tierMode = update.tierMode
       if (update.tiers && typeof update.tiers === "object") cfg.tiers = sanitizeTiers(update.tiers)
+      if (update.variantMode === "off" || update.variantMode === "auto") cfg.variantMode = update.variantMode
       if (
         Array.isArray(update.allowedTopologies) &&
         update.allowedTopologies.every((t) => typeof t === "string")

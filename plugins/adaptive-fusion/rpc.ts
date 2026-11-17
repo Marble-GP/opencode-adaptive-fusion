@@ -99,9 +99,13 @@ export const AdaptiveFusion = Rpc.define({
               topologyPriorStrength: { type: "number" },
               // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
               // failures before the session is moved to a healthy model.
+              // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
+              // failures before the session is moved to a healthy model.
               rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
+              // v1.1: reasoning-effort (variant) auto-selection
+              variantMode: { type: "string", enum: ["off", "auto"] },
               tiers: {
                 type: "object",
                 properties: {
@@ -162,6 +166,8 @@ export const AdaptiveFusion = Rpc.define({
               rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
+              // v1.1: reasoning-effort (variant) auto-selection
+              variantMode: { type: "string", enum: ["off", "auto"] },
               tiers: {
                 type: "object",
                 properties: {
@@ -209,6 +215,7 @@ export const AdaptiveFusion = Rpc.define({
               "rescueAttemptsBeforeSwitch",
               "chainMode",
               "tierMode",
+              "variantMode",
               "tiers",
               "jevAvailable",
               "lang",
