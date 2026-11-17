@@ -10,7 +10,7 @@
 // /fusion-provider   Change the routing target provider
 // /fusion-whitelist  Edit the whitelist of routing candidate models
 // /fusion-costcap    Edit the input/output cost caps used when the whitelist is empty
-// /fusion-weights    Batch-adjust routing/topology weights (presets + key=value pairs)
+// /fusion-weights    Adjust routing/topology weights (presets + combobox editor with descriptions)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
 // /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
@@ -37,47 +37,109 @@ const errorText = (error: unknown): string => {
 
 // Tunable weights/coefficients of the routing and topology scores (v1.0).
 // These are adjustable server-side via the config RPC but had no TUI surface;
-// /fusion-weights edits them in one place. Aliases + validation ranges.
+// /fusion-weights edits them in one place. Aliases, validation ranges, and
+// localized help descriptions (shown in the picker and the edit prompt).
 const WEIGHT_FIELDS: {
   alias: string
   server: string
   min: number
   max: number
   integer?: boolean
+  // What the coefficient means (ja / en)
+  ja: string
+  en: string
 }[] = [
-  { alias: "cost", server: "costWeight", min: 0, max: 1 },
-  { alias: "latency", server: "latencyWeight", min: 0, max: 1 },
-  { alias: "explore", server: "exploreRate", min: 0, max: 1 },
-  { alias: "learning", server: "learningRate", min: 0, max: 1 },
-  { alias: "minobs", server: "minObservations", min: 1, max: 100, integer: true },
-  { alias: "bench", server: "benchmarkPriorWeight", min: 0, max: 50 },
-  { alias: "audit", server: "autoReviewWeight", min: 0, max: 1 },
-  { alias: "topojev", server: "topologyWeightJev", min: 0, max: 1 },
-  { alias: "topocp", server: "topologyWeightHumanCP", min: 0, max: 1 },
-  { alias: "topoauto", server: "topologyWeightAuto", min: 0, max: 1 },
-  { alias: "topocalls", server: "maxTopologyCalls", min: 1, max: 16, integer: true },
+  {
+    alias: "cost",
+    server: "costWeight",
+    min: 0,
+    max: 1,
+    ja: "コストペナルティの重み。大きいほど安いモデルを優先",
+    en: "weight of the cost penalty; higher prefers cheaper models",
+  },
+  {
+    alias: "latency",
+    server: "latencyWeight",
+    min: 0,
+    max: 1,
+    ja: "レイテンシペナルティの重み。大きいほど速いモデルを優先",
+    en: "weight of the latency penalty; higher prefers faster models",
+  },
+  {
+    alias: "explore",
+    server: "exploreRate",
+    min: 0,
+    max: 1,
+    ja: "定常状態の探索率(ε-greedy)。大きいほど多様なモデルを試す",
+    en: "steady-state exploration rate (eps-greedy); higher tries more models",
+  },
+  {
+    alias: "learning",
+    server: "learningRate",
+    min: 0,
+    max: 1,
+    ja: "学習期間の探索率。観測が少ないモデルを優先的に試す",
+    en: "exploration rate while models are under-sampled",
+  },
+  {
+    alias: "minobs",
+    server: "minObservations",
+    min: 1,
+    max: 100,
+    integer: true,
+    ja: "モデルを信頼するまでの最小観測数。小さいほど早く本命選択に移る",
+    en: "minimum observations before a model is trusted",
+  },
+  {
+    alias: "bench",
+    server: "benchmarkPriorWeight",
+    min: 0,
+    max: 50,
+    ja: "ベンチマーク事前分布の強さ(k)。0 で無効",
+    en: "strength (k) of the benchmark prior; 0 disables it",
+  },
+  {
+    alias: "audit",
+    server: "autoReviewWeight",
+    min: 0,
+    max: 1,
+    ja: "監査(自動審査)スコアを品質項に混ぜる重み。0 = shadow 表示のみ",
+    en: "how much the audit auto-review score mixes into the quality term; 0 = shadow display only",
+  },
+  {
+    alias: "topojev",
+    server: "topologyWeightJev",
+    min: 0,
+    max: 1,
+    ja: "トポロジー選択での Jev 事前確率の重み",
+    en: "weight of the Jev prior in topology selection",
+  },
+  {
+    alias: "topocp",
+    server: "topologyWeightHumanCP",
+    min: 0,
+    max: 1,
+    ja: "トポロジー選択での人間コスパ評価の重み",
+    en: "weight of human cost-performance ratings in topology selection",
+  },
+  {
+    alias: "topoauto",
+    server: "topologyWeightAuto",
+    min: 0,
+    max: 1,
+    ja: "トポロジー選択での自動観測(品質/ok率)の重み",
+    en: "weight of automatic observations (quality/ok-rate) in topology selection",
+  },
+  {
+    alias: "topocalls",
+    server: "maxTopologyCalls",
+    min: 1,
+    max: 16,
+    integer: true,
+    ja: "応答あたりの補助呼び出し上限(コストガード)",
+    en: "max auxiliary calls per response (cost guard)",
+  },
 ]
-
-// Parse "cost=0.2 latency=0.1" (space/comma separated, aliases case-insensitive).
-// Returns the partial update object, or the first parse/validation error as a string.
-const parseWeightInput = (input: string): Record<string, number> | string => {
-  const tokens = input.trim().split(/[\s,]+/).filter(Boolean)
-  if (tokens.length === 0) return "no fields given"
-  const update: Record<string, number> = {}
-  for (const token of tokens) {
-    const eq = token.indexOf("=")
-    if (eq <= 0) return `bad token: ${token} (expected key=value)`
-    const alias = token.slice(0, eq).toLowerCase()
-    const raw = Number(token.slice(eq + 1))
-    const field = WEIGHT_FIELDS.find((f) => f.alias === alias)
-    if (!field)
-      return `unknown key: ${alias} (valid: ${WEIGHT_FIELDS.map((f) => f.alias).join(" ")})`
-    if (!Number.isFinite(raw) || raw < field.min || raw > field.max)
-      return `${alias} must be a number from ${field.min} to ${field.max}`
-    update[field.server] = field.integer ? Math.floor(raw) : raw
-  }
-  return update
-}
 
 // Presets for /fusion-weights (select option -> partial update).
 const WEIGHT_PRESETS: Record<string, Record<string, number>> = {
@@ -754,22 +816,15 @@ export default Plugin.define({
                   },
                   {
                     title: tr(
-                      "コンボボックス: 係数を1つずつ選んで編集",
-                      "combobox: pick one coefficient at a time and edit it",
-                    ),
-                    value: "field",
-                  },
-                  {
-                    title: tr(
-                      "一括: key=value をまとめて編集",
-                      "batch: edit key=value pairs at once",
+                      "custom: 係数を編集(検索・説明付きリスト)",
+                      "custom: edit coefficients (searchable, with descriptions)",
                     ),
                     value: "custom",
                   },
                 ],
               })
               if (!choice) return
-              if (choice !== "custom" && choice !== "field") {
+              if (choice !== "custom") {
                 const update = WEIGHT_PRESETS[choice]
                 const result = await fusion.config(
                   { update },
@@ -785,12 +840,13 @@ export default Plugin.define({
                 )
                 return
               }
-              // Combobox-style editing (v1.0): a single native combobox widget
-              // is not available in the dialog API, so compose searchable
-              // select (type-to-filter field list with current values) with a
+              // Custom = combobox (v1.0). A single native combobox widget is
+              // not available in the dialog API, so compose a searchable
+              // select with per-option descriptions (type-to-filter, help
+              // text shown by the host without cluttering the list) with a
               // prompt prefilled with the current value per field. Editing
               // loops back to the list; Esc finishes.
-              if (choice === "field") {
+              {
                 let cur: FusionConfig = c
                 for (;;) {
                   const picked = await context.ui.dialog.select({
@@ -801,21 +857,34 @@ export default Plugin.define({
                     options: WEIGHT_FIELDS.map((f) => ({
                       title: `${f.alias} = ${(cur as any)[f.server] ?? "-"}`,
                       value: f.alias,
+                      // Help text: what the coefficient means + its range.
+                      description: tr(
+                        `${f.ja}(範囲 ${f.min}〜${f.max}${f.integer ? "・整数" : ""})`,
+                        `${f.en} (${f.min}..${f.max}${f.integer ? ", integer" : ""})`,
+                      ),
                     })),
+                    // Match aliases and description words (e.g. "topo" or "コスト")
                     search: (query, options) =>
-                      options.filter((o) =>
-                        o.title.toLowerCase().includes(query.toLowerCase()),
+                      options.filter(
+                        (o) =>
+                          o.title.toLowerCase().includes(query.toLowerCase()) ||
+                          (o.description ?? "")
+                            .toLowerCase()
+                            .includes(query.toLowerCase()),
                       ),
                   })
                   if (!picked) break
                   const field = WEIGHT_FIELDS.find((f) => f.alias === picked)
                   if (!field) break
+                  const help = tr(field.ja, field.en)
+                  const range = tr(
+                    `${field.min}〜${field.max}${field.integer ? "・整数" : ""}`,
+                    `${field.min}..${field.max}${field.integer ? ", integer" : ""}`,
+                  )
                   const input = await context.ui.dialog.prompt({
                     title: `adaptive-fusion weights: ${field.alias}`,
-                    placeholder: tr(
-                      `${field.min}〜${field.max}${field.integer ? "(整数)" : ""}`,
-                      `${field.min}..${field.max}${field.integer ? " (integer)" : ""}`,
-                    ),
+                    // Description shown while editing too
+                    placeholder: `${help} — ${range}`,
                     default: String((cur as any)[field.server] ?? ""),
                   })
                   if (input === undefined) continue
@@ -843,50 +912,6 @@ export default Plugin.define({
                 }
                 return
               }
-              // Batch: one prompt with key=value pairs
-              const currentText = [
-                `cost=${c.costWeight ?? "-"}`,
-                `latency=${c.latencyWeight ?? "-"}`,
-                `explore=${c.exploreRate ?? "-"}`,
-                `learning=${c.learningRate ?? "-"}`,
-                `minobs=${c.minObservations ?? "-"}`,
-                `bench=${c.benchmarkPriorWeight ?? "-"}`,
-                `audit=${c.autoReviewWeight ?? "-"}`,
-                `topojev=${c.topologyWeightJev ?? "-"}`,
-                `topocp=${c.topologyWeightHumanCP ?? "-"}`,
-                `topoauto=${c.topologyWeightAuto ?? "-"}`,
-                `topocalls=${c.maxTopologyCalls ?? "-"}`,
-              ].join(" ")
-              const input = await context.ui.dialog.prompt({
-                title: "adaptive-fusion weights",
-                placeholder: tr(
-                  "key=value を半角スペース/カンマ区切りで(例: cost=0.15 latency=0.1)。keys: cost latency explore learning minobs bench audit topojev topocp topoauto topocalls",
-                  "key=value pairs separated by spaces or commas (e.g. cost=0.15 latency=0.1). keys: cost latency explore learning minobs bench audit topojev topocp topoauto topocalls",
-                ),
-                default: currentText,
-              })
-              if (input === undefined) return
-              const parsed = parseWeightInput(input)
-              if (typeof parsed === "string") {
-                context.ui.toast.show({
-                  message: `fusion-weights: ${parsed}`,
-                  variant: "error",
-                })
-                return
-              }
-              if (Object.keys(parsed).length === 0) return
-              const result = await fusion.config(
-                { update: parsed },
-                { location: location() },
-              )
-              context.ui.toast.show({
-                message: `weights: ${Object.keys(parsed).join(", ")}`,
-                variant: "success",
-              })
-              showLongText(
-                "adaptive-fusion config",
-                formatConfig(result.config, lang() === "en"),
-              )
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-weights: ${errorText(error)}`,

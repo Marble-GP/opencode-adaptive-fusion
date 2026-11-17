@@ -12,13 +12,13 @@
 - **Full-turn cost model**: the routing cost penalty now compares
   `input + output + cache.read + cache.write` unit prices (USD/1M tokens)
   instead of output price alone.
-- **`/fusion-weights`**: batch-adjust the routing/topology weights that were
+- **`/fusion-weights`**: adjust the routing/topology weights that were
   previously only reachable through `opencode.json` options — five presets
-  (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`), a
-  combobox-style editor (searchable field list, each value edited in a
-  prefilled prompt), and a `key=value` batch editor for all eleven tunables
-  (`cost`, `latency`, `explore`, `learning`, `minobs`, `bench`, `audit`,
-  `topojev`, `topocp`, `topoauto`, `topocalls`), with range validation.
+  (`balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`) plus a
+  `custom` editor: a searchable picker of all eleven tunables (`cost`,
+  `latency`, `explore`, `learning`, `minobs`, `bench`, `audit`, `topojev`,
+  `topocp`, `topoauto`, `topocalls`) with per-option help descriptions and
+  range-validated, prefilled prompts.
 
 ### Fixed
 - **Probe strictness**: the recovery probe (`Reply with exactly: OK`) now
