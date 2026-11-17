@@ -223,6 +223,7 @@ messages to the agent and never pollute session history.
 | `/fusion-config` | Show the current configuration. |
 | `/fusion-lang` | Switch the display language of commands and dialogs between Japanese and English (persisted). |
 | `/fusion-costcap` | Edit input/output cost caps used when the whitelist is empty (default `0,0`). |
+| `/fusion-weights` | Batch-adjust routing/topology weights: presets (`balanced` / `cost-first` / `quality-first` / `snappy` / `audit-on`) or `key=value` pairs (`cost latency explore learning minobs bench audit topojev topocp topoauto topocalls`). |
 | `/fusion-review` | Open the response review panel: summary, 1–5 rating, turn statistics. **Pick a turn to review older responses** (`0 = latest`, `1 = one turn back`, …). |
 | `/fusion-reviewmodel` | Set the shadow auto-review model (`provider/model`; empty clears it). |
 | `/fusion-audit` | Set the auto-review weight (`0` = shadow display only; `0.2` typical when enabled). |

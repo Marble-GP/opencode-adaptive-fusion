@@ -10,6 +10,7 @@
 // /fusion-provider   Change the routing target provider
 // /fusion-whitelist  Edit the whitelist of routing candidate models
 // /fusion-costcap    Edit the input/output cost caps used when the whitelist is empty
+// /fusion-weights    Batch-adjust routing/topology weights (presets + key=value pairs)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
 // /fusion-probe      Send a simultaneous test prompt to candidate models (response evaluation)
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
@@ -32,6 +33,64 @@ const errorText = (error: unknown): string => {
   } catch {
     return String(error)
   }
+}
+
+// Tunable weights/coefficients of the routing and topology scores (v1.0).
+// These are adjustable server-side via the config RPC but had no TUI surface;
+// /fusion-weights edits them in one place. Aliases + validation ranges.
+const WEIGHT_FIELDS: {
+  alias: string
+  server: string
+  min: number
+  max: number
+  integer?: boolean
+}[] = [
+  { alias: "cost", server: "costWeight", min: 0, max: 1 },
+  { alias: "latency", server: "latencyWeight", min: 0, max: 1 },
+  { alias: "explore", server: "exploreRate", min: 0, max: 1 },
+  { alias: "learning", server: "learningRate", min: 0, max: 1 },
+  { alias: "minobs", server: "minObservations", min: 1, max: 100, integer: true },
+  { alias: "bench", server: "benchmarkPriorWeight", min: 0, max: 50 },
+  { alias: "audit", server: "autoReviewWeight", min: 0, max: 1 },
+  { alias: "topojev", server: "topologyWeightJev", min: 0, max: 1 },
+  { alias: "topocp", server: "topologyWeightHumanCP", min: 0, max: 1 },
+  { alias: "topoauto", server: "topologyWeightAuto", min: 0, max: 1 },
+  { alias: "topocalls", server: "maxTopologyCalls", min: 1, max: 16, integer: true },
+]
+
+// Parse "cost=0.2 latency=0.1" (space/comma separated, aliases case-insensitive).
+// Returns the partial update object, or the first parse/validation error as a string.
+const parseWeightInput = (input: string): Record<string, number> | string => {
+  const tokens = input.trim().split(/[\s,]+/).filter(Boolean)
+  if (tokens.length === 0) return "no fields given"
+  const update: Record<string, number> = {}
+  for (const token of tokens) {
+    const eq = token.indexOf("=")
+    if (eq <= 0) return `bad token: ${token} (expected key=value)`
+    const alias = token.slice(0, eq).toLowerCase()
+    const raw = Number(token.slice(eq + 1))
+    const field = WEIGHT_FIELDS.find((f) => f.alias === alias)
+    if (!field)
+      return `unknown key: ${alias} (valid: ${WEIGHT_FIELDS.map((f) => f.alias).join(" ")})`
+    if (!Number.isFinite(raw) || raw < field.min || raw > field.max)
+      return `${alias} must be a number from ${field.min} to ${field.max}`
+    update[field.server] = field.integer ? Math.floor(raw) : raw
+  }
+  return update
+}
+
+// Presets for /fusion-weights (select option -> partial update).
+const WEIGHT_PRESETS: Record<string, Record<string, number>> = {
+  balanced: {
+    costWeight: 0.1,
+    latencyWeight: 0.05,
+    exploreRate: 0.05,
+    learningRate: 0.3,
+  },
+  "cost-first": { costWeight: 0.25, latencyWeight: 0.1 },
+  "quality-first": { costWeight: 0.02, latencyWeight: 0.02 },
+  snappy: { costWeight: 0.05, latencyWeight: 0.2 },
+  "audit-on": { autoReviewWeight: 0.2 },
 }
 
 type FusionConfig = {
@@ -638,6 +697,134 @@ export default Plugin.define({
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-costcap: ${errorText(error)}`,
+                variant: "error",
+              })
+            }
+          },
+        },
+        {
+          id: "fusion.weights",
+          title: tr(
+            "adaptive-fusion: ルーティング/トポロジーの重み係数を一括調整",
+            "adaptive-fusion: batch-adjust routing/topology weights",
+          ),
+          slash: { name: "fusion-weights" },
+          run: async () => {
+            try {
+              const current = await fusion.config({}, { location: location() })
+              const c = current.config
+              const choice = await context.ui.dialog.select({
+                title: "adaptive-fusion weights",
+                current: "balanced",
+                options: [
+                  {
+                    title: tr(
+                      "プリセット: balanced (既定のバランス)",
+                      "preset: balanced (default balance)",
+                    ),
+                    value: "balanced",
+                  },
+                  {
+                    title: tr(
+                      "プリセット: cost-first (コスト重視)",
+                      "preset: cost-first (cost matters most)",
+                    ),
+                    value: "cost-first",
+                  },
+                  {
+                    title: tr(
+                      "プリセット: quality-first (品質重視・コスト弱め)",
+                      "preset: quality-first (quality first, weaker cost penalty)",
+                    ),
+                    value: "quality-first",
+                  },
+                  {
+                    title: tr(
+                      "プリセット: snappy (応答速度重視)",
+                      "preset: snappy (latency first)",
+                    ),
+                    value: "snappy",
+                  },
+                  {
+                    title: tr(
+                      "プリセット: audit-on (監査重み 0.2)",
+                      "preset: audit-on (audit weight 0.2)",
+                    ),
+                    value: "audit-on",
+                  },
+                  {
+                    title: tr(
+                      "カスタム: key=value を一括編集",
+                      "custom: batch-edit key=value pairs",
+                    ),
+                    value: "custom",
+                  },
+                ],
+              })
+              if (!choice) return
+              if (choice !== "custom") {
+                const update = WEIGHT_PRESETS[choice]
+                const result = await fusion.config(
+                  { update },
+                  { location: location() },
+                )
+                context.ui.toast.show({
+                  message: `weights: ${choice}`,
+                  variant: "success",
+                })
+                showLongText(
+                  "adaptive-fusion config",
+                  formatConfig(result.config, lang() === "en"),
+                )
+                return
+              }
+              // Custom: one batch prompt with key=value pairs
+              const currentText = [
+                `cost=${c.costWeight ?? "-"}`,
+                `latency=${c.latencyWeight ?? "-"}`,
+                `explore=${c.exploreRate ?? "-"}`,
+                `learning=${c.learningRate ?? "-"}`,
+                `minobs=${c.minObservations ?? "-"}`,
+                `bench=${c.benchmarkPriorWeight ?? "-"}`,
+                `audit=${c.autoReviewWeight ?? "-"}`,
+                `topojev=${c.topologyWeightJev ?? "-"}`,
+                `topocp=${c.topologyWeightHumanCP ?? "-"}`,
+                `topoauto=${c.topologyWeightAuto ?? "-"}`,
+                `topocalls=${c.maxTopologyCalls ?? "-"}`,
+              ].join(" ")
+              const input = await context.ui.dialog.prompt({
+                title: "adaptive-fusion weights",
+                placeholder: tr(
+                  "key=value を半角スペース/カンマ区切りで(例: cost=0.15 latency=0.1)。keys: cost latency explore learning minobs bench audit topojev topocp topoauto topocalls",
+                  "key=value pairs separated by spaces or commas (e.g. cost=0.15 latency=0.1). keys: cost latency explore learning minobs bench audit topojev topocp topoauto topocalls",
+                ),
+                default: currentText,
+              })
+              if (input === undefined) return
+              const parsed = parseWeightInput(input)
+              if (typeof parsed === "string") {
+                context.ui.toast.show({
+                  message: `fusion-weights: ${parsed}`,
+                  variant: "error",
+                })
+                return
+              }
+              if (Object.keys(parsed).length === 0) return
+              const result = await fusion.config(
+                { update: parsed },
+                { location: location() },
+              )
+              context.ui.toast.show({
+                message: `weights: ${Object.keys(parsed).join(", ")}`,
+                variant: "success",
+              })
+              showLongText(
+                "adaptive-fusion config",
+                formatConfig(result.config, lang() === "en"),
+              )
+            } catch (error) {
+              context.ui.toast.show({
+                message: `fusion-weights: ${errorText(error)}`,
                 variant: "error",
               })
             }
