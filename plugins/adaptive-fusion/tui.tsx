@@ -198,6 +198,16 @@ const WEIGHT_FIELDS: {
     ja: "レスキュー切替前に許す連続失敗回数（デフォルト 3、範囲 1..10）。\n- 1回目の失敗は待機し、リトライに備える",
     en: "rescue: attempts before switch before the session is moved to a healthy model (default 3, range 1..10). 1st failure waits; let retries happen",
   },
+  {
+    alias: "varexplore",
+    server: "variantExploreRate",
+    min: 0,
+    max: 1,
+    sja: "variant: 探索率(ε)",
+    sen: "variant: exploration rate",
+    ja: "variant選択の ε-greedy 探索確率(0..1)。0 で計算値のみ",
+    en: "ε-greedy exploration probability for variant selection (0..1). 0 = computed pick only",
+  },
 ]
 
 // Presets for /fusion-params (select option -> partial update).
@@ -244,8 +254,12 @@ type FusionConfig = {
   topologyPriorStrength?: number
   // v1.1: rescue (after-fail) switch: allow up to N consecutive transient failures before the session is moved to a healthy model.
   rescueAttemptsBeforeSwitch?: number
-  // v1.1: reasoning-effort (variant) auto-selection (off/auto)
-  variantMode?: "off" | "auto"
+  // v1.1: reasoning-effort (variant) selection (off/auto/fixed)
+  variantMode?: "off" | "auto" | "fixed"
+  // v1.1: variant forced in variantMode=fixed (null = unset)
+  variantFixed?: string | null
+  // v1.1: ε for exploring non-computed variants (0..1)
+  variantExploreRate?: number
   chainMode?: "off" | "active"
   tierMode?: "off" | "manual" | "auto"
   tiers?: { heavy?: string[]; middle?: string[]; light?: string[] }
@@ -274,7 +288,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
-    `variant       : ${c.variantMode === "off" ? T("off (effort/thinking は変更しない)", "off (never touch effort/thinking)") : T("auto (負荷帯に応じた #variant 自動選択, 明示指定は優先)", "auto (pick #variant by load band; explicit choice wins)")}`,
+    `variant       : ${c.variantMode === "fixed" ? T(`fixed (#${c.variantFixed ?? "-"} / モデルに無い場合はスキップ)`, `fixed (#${c.variantFixed ?? "-"} / skipped when the model lacks it)`) : c.variantMode === "off" ? T("off (effort/thinking は変更しない)", "off (never touch effort/thinking)") : T(`auto (Jev/LLMヒント+重量クラス補正+探索ε ${c.variantExploreRate ?? "-"}+観測学習 / 明示指定は優先)`, `auto (Jev/LLM hint + weight-class compensation + explore ε ${c.variantExploreRate ?? "-"} + outcome learning; explicit choice wins)`)}`,
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
@@ -1125,23 +1139,90 @@ export default Plugin.define({
         },
         {
           id: "fusion.variantmode",
-          title: tr("adaptive-fusion: reasoning effort(thinking レベル)の自動選択を切替", "adaptive-fusion: cycle reasoning-effort (thinking level) auto-selection"),
+          title: tr("adaptive-fusion: reasoning effort(thinking レベル)の選択方法を設定", "adaptive-fusion: configure reasoning-effort (thinking level) selection"),
           slash: { name: "fusion-variantmode" },
           run: async () => {
             try {
               const current = await fusion.config({}, { location: location() })
-              const next = current.config.variantMode === "off" ? "auto" : "off"
+              const choice = await context.ui.dialog.select({
+                title: "adaptive-fusion variant mode",
+                current: current.config.variantMode ?? "auto",
+                options: [
+                  {
+                    title: "auto",
+                    value: "auto",
+                    description: tr(
+                      "Jev/LLMのeffortヒント+モデル重量クラス補正+探索+観測学習(明示指定は優先)",
+                      "Jev/LLM effort hint + weight-class compensation + exploration + outcome learning (explicit choice wins)",
+                    ),
+                  },
+                  {
+                    title: "fixed",
+                    value: "fixed",
+                    description: tr(
+                      "常に指定variantを使用(モデルに無い場合はスキップ)",
+                      "always use the fixed variant (skipped when the model lacks it)",
+                    ),
+                  },
+                  {
+                    title: "off",
+                    value: "off",
+                    description: tr(
+                      "effort/thinking は変更しない",
+                      "never touch effort/thinking",
+                    ),
+                  },
+                ],
+              })
+              if (!choice) return
+              let variantFixed: string | null =
+                current.config.variantFixed ?? null
+              if (choice === "fixed") {
+                const input = await context.ui.dialog.prompt({
+                  title: tr(
+                    "adaptive-fusion: 固定するvariant (例: high / medium / max / xhigh)",
+                    "adaptive-fusion: variant to fix (e.g. high / medium / max / xhigh)",
+                  ),
+                  placeholder: tr(
+                    "low / medium / high / xhigh / max など。空でキャンセル",
+                    "low / medium / high / xhigh / max... Empty cancels",
+                  ),
+                  default: current.config.variantFixed ?? "high",
+                })
+                if (input === undefined) return
+                const trimmed = input.trim()
+                if (trimmed.length === 0) return
+                variantFixed = trimmed
+              } else if (choice === "auto") {
+                // Switching back to auto clears the stale fixed variant
+                variantFixed = null
+              }
               const result = await fusion.config(
-                { update: { variantMode: next } },
+                {
+                  update: {
+                    variantMode: choice,
+                    ...(choice === "fixed" ? { variantFixed } : { variantFixed: null }),
+                  },
+                },
                 { location: location() },
               )
+              const c = result.config
               context.ui.toast.show({
                 message:
-                  result.config.variantMode === "auto"
-                    ? tr("variant: auto(負荷帯に応じて #variant を選択 / 明示指定は優先)", "variant: auto (pick #variant by load band; explicit choice wins)")
-                    : tr("variant: off(effort/thinking は変更しない)", "variant: off (never touch effort/thinking)"),
+                  c.variantMode === "auto"
+                    ? tr(
+                        `variant: auto(Jev/LLMヒント+クラス補正+探索ε ${c.variantExploreRate ?? "-"})`,
+                        `variant: auto (Jev/LLM hint + class compensation + explore ε ${c.variantExploreRate ?? "-"})`,
+                      )
+                    : c.variantMode === "fixed"
+                      ? tr(
+                          `variant: fixed (#${c.variantFixed ?? "?"})`,
+                          `variant: fixed (#${c.variantFixed ?? "?"})`,
+                        )
+                      : tr("variant: off(effort/thinking は変更しない)", "variant: off (never touch effort/thinking)"),
                 variant: "success",
               })
+              showLongText("adaptive-fusion config", formatConfig(c, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-variantmode: ${errorText(error)}`,

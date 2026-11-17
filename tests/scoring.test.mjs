@@ -341,9 +341,11 @@ check(
   1,
 );
 
-// --- Variant (reasoning-effort) selection (mirror of pickVariantIndex) ---
-// Positional over the model's own variant list ranked by an effort scale:
-// light -> lowest, middle -> median, heavy -> highest; unknown ids rank mid.
+// --- Variant (reasoning-effort) selection (mirror of pickVariantIndex / variantLevelFor) ---
+// "Model first, then variant": the effort LEVEL is a function of the task band
+// and the CHOSEN MODEL's weight class — matched pairs keep the provider
+// default, heavier-than-model tasks compensate up, lighter ones down. The
+// variant itself is positional over the model's own list ranked by effort.
 const VARIANT_EFFORT_RANK = {
   none: 0,
   minimal: 0,
@@ -357,26 +359,44 @@ const VARIANT_EFFORT_RANK = {
   reasoning: 3,
 };
 const variantEffortRank = (id) => VARIANT_EFFORT_RANK[id.toLowerCase()] ?? 2;
-const pickVariantIndex = (variants, load) => {
+const variantBandLevel = (load) => 2 - ["heavy", "middle", "light"].indexOf(load);
+const pickVariantIndex = (variants, level) => {
   if (!Array.isArray(variants) || variants.length < 2) return -1;
   const ranked = variants
     .map((v, i) => ({ rank: variantEffortRank(String(v)), i }))
     .sort((a, b) => a.rank - b.rank);
-  if (load === "heavy") return ranked[ranked.length - 1].i;
-  if (load === "middle")
+  if (level >= 2) return ranked[ranked.length - 1].i;
+  if (level === 1)
     return ranked[Math.max(0, Math.ceil(ranked.length / 2) - 1)].i;
   return ranked[0].i;
 };
-const pickOf = (list, load) => (pickVariantIndex(list, load) >= 0 ? list[pickVariantIndex(list, load)] : undefined);
-check("no variants -> no pick", pickOf(["high"], "heavy"), undefined);
-check("light picks lowest effort", pickOf(["low", "medium", "high"], "light"), "low");
-check("middle picks median", pickOf(["low", "medium", "high"], "middle"), "medium");
-check("heavy picks highest effort", pickOf(["low", "medium", "high"], "heavy"), "high");
-check("even count middle picks lower median", pickOf(["high", "max"], "middle"), "high");
-check("openai scale heavy", pickOf(["none", "minimal", "low", "medium", "high", "xhigh"], "heavy"), "xhigh");
-check("unknown ids rank mid", pickOf(["fast", "turbo", "ultra"], "heavy"), "ultra");
-check("unknown ids light", pickOf(["fast", "turbo", "ultra"], "light"), "fast");
-check("stable order for ties", pickOf(["a", "b", "c", "d"], "light"), "a");
+const variantLevelFor = (load, cls) => {
+  const band = variantBandLevel(load);
+  if (!cls) return band;
+  const delta = band - variantBandLevel(cls);
+  if (delta === 0) return undefined;
+  return Math.max(0, Math.min(2, 1 + delta));
+};
+const pickOf = (list, level) => (pickVariantIndex(list, level) >= 0 ? list[pickVariantIndex(list, level)] : undefined);
+// level computation: matched -> default, mismatch -> compensate
+check("light on light -> default (no override)", variantLevelFor("light", "light"), undefined);
+check("heavy on heavy -> default (no override)", variantLevelFor("heavy", "heavy"), undefined);
+check("heavy on light -> compensate up (highest)", variantLevelFor("heavy", "light"), 2);
+check("light on heavy -> save cost (lowest)", variantLevelFor("light", "heavy"), 0);
+check("middle on light -> compensate up", variantLevelFor("middle", "light"), 2);
+check("light on middle -> lowest", variantLevelFor("light", "middle"), 0);
+check("unknown class -> band itself", variantLevelFor("heavy", undefined), 2);
+check("unknown class light -> 0", variantLevelFor("light", undefined), 0);
+// positional pick over the model's own list
+check("no variants -> no pick", pickOf(["high"], 2), undefined);
+check("level 0 picks lowest effort", pickOf(["low", "medium", "high"], 0), "low");
+check("level 1 picks median", pickOf(["low", "medium", "high"], 1), "medium");
+check("level 2 picks highest effort", pickOf(["low", "medium", "high"], 2), "high");
+check("even count median picks lower median", pickOf(["high", "max"], 1), "high");
+check("openai scale level 2", pickOf(["none", "minimal", "low", "medium", "high", "xhigh"], 2), "xhigh");
+check("unknown ids rank mid", pickOf(["fast", "turbo", "ultra"], 2), "ultra");
+check("unknown ids level 0", pickOf(["fast", "turbo", "ultra"], 0), "fast");
+check("stable order for ties", pickOf(["a", "b", "c", "d"], 0), "a");
 
 
 if (failures > 0) {

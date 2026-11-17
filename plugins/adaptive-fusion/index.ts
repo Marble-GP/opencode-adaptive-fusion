@@ -48,6 +48,7 @@ const TASK_AUTO_PREFIX = "fusion/auto/task/"
 const AUTO_SKIP_PREFIX = "fusion/auto-skip/"
 const AUTO_SKIP_KEY = "fusion/auto-skip/latest"
 const TOPOLOGY_PREFIX = "fusion/topology/"
+const VARIANT_PREFIX = "fusion/variant/"
 const TASK_TOPOLOGY_PREFIX = "fusion/topology/task/"
 const JEV_KEY_KEY = "fusion/jev-key"
 const REVIEW_PREFIX = "fusion/review/"
@@ -242,11 +243,19 @@ type FusionConfig = {
   tierMode: "off" | "manual" | "auto"
   // Reasoning-effort (thinking level) auto-selection (v1.1). OpenCode models can
   // expose named variants (#low/#high/#max...) that switch request settings such
-  // as reasoningEffort / thinking budget. auto = pick the variant matching the
-  // task's load band (light -> lowest effort, heavy -> highest) for every
-  // dispatch; the user's explicit variant choice (ctrl+t / agent config) always
-  // wins. off = never touch the variant.
-  variantMode: "off" | "auto"
+  // as reasoningEffort / thinking budget. Modes:
+  //   off   = never touch the variant
+  //   auto  = model first, then variant: the effort level comes from the
+  //           per-turn Jev/LLM hint (same round trip as classification), is
+  //           compensated against the CHOSEN MODEL's weight class, explored
+  //           with ε (variantExploreRate) and refined by per-(model,variant)
+  //           outcome learning. An explicit variant choice always wins.
+  //   fixed = always apply cfg.variantFixed (when the model has it)
+  variantMode: "off" | "auto" | "fixed"
+  // Variant forced in variantMode=fixed (e.g. "high"). null = unset.
+  variantFixed: string | null
+  // ε probability of exploring a non-computed variant (0..1). Default 0.1.
+  variantExploreRate: number
   // Model groups per tier (an enhanced whitelist).
   // Each tier can hold multiple provider/model entries; within a tier, the existing statScore+exploration applies.
   tiers: { heavy: string[]; middle: string[]; light: string[] }
@@ -403,9 +412,19 @@ export default Plugin.define({
         return raw === "manual" || raw === "auto" || raw === "off" ? raw : "off"
       })(),
       tiers: sanitizeTiers(ctx.options.tiers),
-      // Reasoning-effort (variant) auto-selection. "auto" applies the variant
-      // matching the load band unless the session/agent already picked one.
-      variantMode: ctx.options.variantMode === "off" ? "off" : "auto",
+      // Reasoning-effort (variant) selection. "auto" = hint + class
+      // compensation + exploration + learning; "fixed" = variantFixed.
+      variantMode: (["off", "auto", "fixed"] as const).includes(
+        ctx.options.variantMode as any,
+      )
+        ? (ctx.options.variantMode as any)
+        : "auto",
+      variantFixed:
+        typeof ctx.options.variantFixed === "string" &&
+        ctx.options.variantFixed.length > 0
+          ? ctx.options.variantFixed
+          : null,
+      variantExploreRate: clamp(num(ctx.options.variantExploreRate, 0.1), 0, 1),
       // Display language. Can be chosen per install via opencode.json options.lang
       // (same saved-settings > options priority as other items).
       lang: ctx.options.lang === "en" ? "en" : "ja",
@@ -499,8 +518,16 @@ export default Plugin.define({
         cfg.tierMode = s.tierMode
       if (s.tiers && typeof s.tiers === "object")
         cfg.tiers = sanitizeTiers(s.tiers)
-      if (s.variantMode === "off" || s.variantMode === "auto")
+      if (
+        s.variantMode === "off" ||
+        s.variantMode === "auto" ||
+        s.variantMode === "fixed"
+      )
         cfg.variantMode = s.variantMode
+      if (typeof s.variantFixed === "string")
+        cfg.variantFixed = s.variantFixed.length > 0 ? s.variantFixed : null
+      if (typeof s.variantExploreRate === "number")
+        cfg.variantExploreRate = clamp(s.variantExploreRate, 0, 1)
       if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
       if (typeof s.autoReviewWeight === "number")
         cfg.autoReviewWeight = clamp(s.autoReviewWeight, 0, 1)
@@ -1646,6 +1673,12 @@ export default Plugin.define({
     // Per-session load band (v0.8 tier routing). Estimated at admission classify,
     // used by the tier selection in experimental.model.resolve. Updated per turn.
     const sessionLoad = new Map<string, TierName>()
+    // Per-session reasoning-effort hint (v1.1 variant auto-selection, 0=low,
+    // 1=medium, 2=high). Asked from Jev in the same round trip as the task
+    // classification (no extra API call), from the legacy LLM classifier, or
+    // derived from the load band as the last resort. Consumed by the resolve
+    // hook's variant selection.
+    const sessionEffort = new Map<string, number>()
 
     // Load-band heuristic (last-resort fallback when Jev/LLM is unavailable).
     // Estimate 0-100 from category defaults + text length + multi-step keywords.
@@ -1695,8 +1728,23 @@ export default Plugin.define({
     // OpenCode models expose named variants ("#low", "#high", "#max", ...)
     // that switch request settings such as reasoningEffort / thinking budget.
     // The variant ids are provider-specific, so selection is positional over
-    // the model's own variant list ranked by an effort scale, not by name:
-    // light -> lowest effort, middle -> median, heavy -> highest.
+    // the model's OWN variant list ranked by an effort scale — not by name.
+    //
+    // The design is "model first, then variant": the routing/tier step picks
+    // the model, and the variant is then chosen against the CHOSEN MODEL's
+    // weight class, not the task band alone. This avoids the rigid coupling
+    // "light task -> light model -> low effort, heavy task -> heavy model ->
+    // high effort":
+    //   matched pair  (task band == model class) -> provider default (no override)
+    //   heavier task  than model (compensate)    -> highest variant
+    //   lighter task  than model (save cost)     -> lowest variant
+    //   model class unknown                      -> the task band itself
+    // Two anti-ossification mechanisms sit on top:
+    //   - ε-greedy exploration (variantExploreRate) samples non-computed
+    //     variants so they accumulate observations
+    //   - per-(model,variant) ok-rate records (fusion/variant/*) can upgrade
+    //    the computed pick to an adjacent effort level with clearly better
+    //    observed success rate
     const VARIANT_EFFORT_RANK: Record<string, number> = {
       none: 0,
       minimal: 0,
@@ -1712,36 +1760,225 @@ export default Plugin.define({
     const variantEffortRank = (id: string) =>
       VARIANT_EFFORT_RANK[id.toLowerCase()] ?? 2
 
-    // Pure helper (mirrored in tests): pick the variant index for the band.
-    // Returns undefined when there is nothing meaningful to pick (0-1 variants).
-    const pickVariantIndex = (variants: string[], load: TierName) => {
+    // Pure helpers (mirrored in tests).
+    const variantBandLevel = (load: TierName) => 2 - TIER_NAMES.indexOf(load)
+    const pickVariantIndex = (variants: string[], level: number) => {
       if (!Array.isArray(variants) || variants.length < 2) return -1
       const ranked = variants
         .map((v, i) => ({ rank: variantEffortRank(String(v)), i }))
         .sort((a, b) => a.rank - b.rank)
-      if (load === "heavy") return ranked[ranked.length - 1].i
-      if (load === "middle")
-        return ranked[Math.max(0, Math.ceil(ranked.length / 2) - 1)].i
+      if (level >= 2) return ranked[ranked.length - 1].i
+      if (level === 1) return ranked[Math.max(0, Math.ceil(ranked.length / 2) - 1)].i
       return ranked[0].i
     }
+    // Which effort level the task asks of the model: undefined = matched
+    // pair (no compensation needed, keep the provider default). `band` is a
+    // raw level 0..2 — either derived from the load band or from the per-turn
+    // Jev/LLM effort hint.
+    const variantLevelForLevel = (band: number, cls: TierName | undefined) => {
+      if (!cls) return band
+      const delta = band - variantBandLevel(cls)
+      if (delta === 0) return undefined
+      return Math.max(0, Math.min(2, 1 + delta))
+    }
+    const variantLevelFor = (load: TierName, cls: TierName | undefined) =>
+      variantLevelForLevel(variantBandLevel(load), cls)
 
-    // Resolve the model's variant list and return the load-matched variant id,
-    // or undefined when the model has no meaningful variant choice.
-    const variantForLoad = async (
+    // Weight class of the dispatched model: the effective tier lists first
+    // (manual/auto), otherwise the benchmark overall score. undefined when
+    // neither is available (class compensation is then skipped).
+    const modelClassOf = (providerID: string, modelID: string): TierName | undefined => {
+      try {
+        const ref = refFor(providerID, modelID)
+        const tiers = resolveTiers()
+        if (tiers) {
+          for (const tier of TIER_NAMES) {
+            if (tiers[tier].some((r) => normRef(r) === normRef(ref)))
+              return tier
+          }
+        }
+        const score = benchmarkFor(currentBenchmarks(), ref)
+        return score === undefined
+          ? undefined
+          : loadFromScore(Math.round(score * 100))
+      } catch {
+        return undefined
+      }
+    }
+
+    // Per-(model,variant) outcome records. Learning data for the neighbor
+    // upgrade and /fusion-stats. Light persistence: one key per variant.
+    type VariantStat = {
+      model: { providerID: string; id: string }
+      variant: string
+      count: number
+      ok: number
+      totalMs: number
+      updatedAt: string
+    }
+    const loadVariantStat = async (
+      providerID: string,
+      modelID: string,
+      variant: string,
+    ): Promise<VariantStat | undefined> => {
+      try {
+        const saved = await ctx.storage.get(
+          `${VARIANT_PREFIX}${providerID}/${modelID}/${variant}`,
+        )
+        if (
+          saved &&
+          typeof saved === "object" &&
+          typeof (saved as VariantStat).count === "number"
+        )
+          return saved as VariantStat
+      } catch {
+        // Unreadable records fall back to the neutral prior
+      }
+      return undefined
+    }
+    const saveVariantStat = async (stat: VariantStat) => {
+      try {
+        await ctx.storage.set(
+          `${VARIANT_PREFIX}${stat.model.providerID}/${stat.model.id}/${stat.variant}`,
+          stat,
+        )
+      } catch {
+        // Recording failure must not block the dispatch
+      }
+    }
+    const recordVariantOutcome = (
+      providerID: string,
+      modelID: string,
+      variant: string | undefined,
+      ok: boolean,
+      ms: number,
+    ) => {
+      if (!variant) return
+      void (async () => {
+        const saved =
+          (await loadVariantStat(providerID, modelID, variant)) ?? {
+            model: { providerID, id: modelID },
+            variant,
+            count: 0,
+            ok: 0,
+            totalMs: 0,
+            updatedAt: "",
+          }
+        saved.count += 1
+        if (ok) saved.ok += 1
+        saved.totalMs += ms
+        saved.updatedAt = new Date().toISOString()
+        await saveVariantStat(saved)
+        logRoute(
+          `VARIANT obs ${providerID}/${modelID}#${variant} ${ok ? "ok" : "fail"} (${saved.ok}/${saved.count})`,
+        )
+      })()
+    }
+
+    // Laplace-smoothed ok-rate (unobserved = neutral 0.5)
+    const variantOkScore = (stat: VariantStat | undefined) =>
+      stat && stat.count > 0 ? (stat.ok + 1) / (stat.count + 2) : 0.5
+
+    // Decide the variant for one dispatch. Returns the variant id (or
+    // undefined = keep provider default) and a human-readable note.
+    // `bandLevel` is the requested effort level 0..2 — the per-turn Jev/LLM
+    // hint when available, otherwise derived from the load band by the caller.
+    const variantForDispatch = async (
       providerID: string,
       modelID: string,
       load: TierName | undefined,
-    ): Promise<string | undefined> => {
+      bandLevel?: number,
+    ): Promise<{ variant?: string; note: string }> => {
       try {
         const info: any = await (ctx.model as any).get(providerID, modelID)
         const ids: string[] = ((info?.variants ?? []) as any[])
           .map((v) => (typeof v === "string" ? v : v?.id))
           .filter((v): v is string => typeof v === "string" && v.length > 0)
-        const index = pickVariantIndex(ids, load ?? "middle")
-        return index >= 0 ? ids[index] : undefined
+        if (ids.length < 2) return { note: "no variants" }
+        // ε-greedy exploration: sometimes sample a non-computed variant so
+        // alternatives accumulate outcome records (anti-ossification).
+        if (Math.random() < clamp(cfg.variantExploreRate, 0, 1)) {
+          return {
+            variant: ids[Math.floor(Math.random() * ids.length)],
+            note: "explore",
+          }
+        }
+        const cls = modelClassOf(providerID, modelID)
+        const level =
+          typeof bandLevel === "number" && Number.isFinite(bandLevel)
+            ? variantLevelForLevel(clamp(Math.round(bandLevel), 0, 2), cls)
+            : variantLevelFor(load ?? "middle", cls)
+        if (level === undefined)
+          return { note: `matched ${cls} (provider default)` }
+        // Ranked by effort; the computed pick is the level's position.
+        const ranked = ids
+          .map((v, i) => ({ id: v, rank: variantEffortRank(v), i }))
+          .sort((a, b) => a.rank - b.rank)
+        const computedPos =
+          level >= 2
+            ? ranked.length - 1
+            : level === 1
+              ? Math.max(0, Math.ceil(ranked.length / 2) - 1)
+              : 0
+        let pos = computedPos
+        // Learned upgrade: an adjacent effort level with a clearly better
+        // observed ok-rate (>=3 observations) replaces the computed pick.
+        const base = await loadVariantStat(providerID, modelID, ranked[pos].id)
+        let bestScore = variantOkScore(base)
+        for (const j of [pos - 1, pos + 1]) {
+          if (j < 0 || j >= ranked.length) continue
+          const neighbor = await loadVariantStat(
+            providerID,
+            modelID,
+            ranked[j].id,
+          )
+          if (!neighbor || neighbor.count < 3) continue
+          const score = variantOkScore(neighbor)
+          if (score >= bestScore + 0.1) {
+            pos = j
+            bestScore = score
+          }
+        }
+        const picked = ranked[pos]
+        return {
+          variant: picked.id,
+          note: `level ${level} of cls=${cls ?? "?"}${pos !== computedPos ? " learned" : ""}`,
+        }
       } catch {
-        return undefined
+        return { note: "catalog unavailable" }
       }
+    }
+
+    // Mode-aware variant decision for one session dispatch: "fixed" forces
+    // cfg.variantFixed (verified against the model's catalog), "auto" runs the
+    // hint + class-compensation + exploration pipeline, undefined = do not touch.
+    const variantForSession = async (
+      providerID: string,
+      modelID: string,
+      sessionID: string,
+    ): Promise<{ variant?: string; note: string } | undefined> => {
+      if (cfg.variantMode === "fixed") {
+        const wanted = cfg.variantFixed
+        if (!wanted) return undefined
+        try {
+          const info: any = await (ctx.model as any).get(providerID, modelID)
+          const has = ((info?.variants ?? []) as any[]).some(
+            (v) => (typeof v === "string" ? v : v?.id) === wanted,
+          )
+          if (!has) return { note: `#${wanted} not available` }
+          return { variant: wanted, note: "fixed" }
+        } catch {
+          return { note: "catalog unavailable" }
+        }
+      }
+      if (cfg.variantMode === "auto")
+        return variantForDispatch(
+          providerID,
+          modelID,
+          sessionLoad.get(sessionID),
+          sessionEffort.get(sessionID),
+        )
+      return undefined
     }
 
     const saveReviewAssignment = async (sessionID: string, category: string) => {
@@ -2721,12 +2958,16 @@ export default Plugin.define({
       // New turn: also discard the previous turn's load band (v0.8 tier routing.
       // Lets the "set if unset" decision in the LLM/heuristic paths work correctly)
       sessionLoad.delete(sessionID)
+      // New turn: also discard the previous turn's effort hint (v1.1 variant
+      // auto-selection). Set again below from Jev/LLM/heuristic.
+      sessionEffort.delete(sessionID)
 
       // --- Jev path (highest priority when an API key exists and jevMode=auto) ---
       // Classify the category with Choice (confidence < 0.5 -> fall back to the legacy path).
       // Topology selection runs in a separate request via pickTopology() after the category is settled
       // (so the state can carry the category and the summary of past records).
       const jev = jevClient()
+      let effortHint: number | undefined
       if (jev) {
         const answers = await jev.ask(text.slice(0, 1000), {
           category: {
@@ -2748,6 +2989,18 @@ export default Plugin.define({
               "76-100 = heavy: architecture design, large refactor, multi-file feature, deep research",
             ],
           },
+          // v1.1: reasoning-effort hint in the same round trip (no extra call).
+          // Consumed by the variant auto-selection in the resolve hook.
+          effort: {
+            type: "choice",
+            instructions:
+              "Pick the reasoning effort (thinking depth) this request needs, weighing the risk of a wrong or shallow answer against wasted tokens.",
+            criteria: {
+              low: "quick lookup, simple edit, formatting, trivial fix — deep thinking would be wasted",
+              medium: "ordinary implementation, debugging, explanation — some reasoning pays off",
+              high: "hard design, large refactor, subtle bug, deep research — a shallow answer is risky",
+            },
+          },
         })
         const catAnswer = answers?.category
         // Load estimation is adopted independently of classification (Jev score trustworthiness is not the selector.
@@ -2760,6 +3013,16 @@ export default Plugin.define({
             "jev",
             diffAnswer.score,
           )
+        }
+        const effAnswer = answers?.effort
+        if (effAnswer?.type === "choice") {
+          const level = { low: 0, medium: 1, high: 2 }[effAnswer.choice]
+          if (level !== undefined) {
+            effortHint = level
+            logRoute(
+              `EFFORT hint ${effAnswer.choice} via jev (conf ${effAnswer.confidence?.toFixed?.(2) ?? "?"})`,
+            )
+          }
         }
         if (
           catAnswer?.type === "choice" &&
@@ -2786,8 +3049,9 @@ export default Plugin.define({
           "review = review or verify, research = question / explain / search,",
           "writing = documents or prose, ops = shell / environment / execution.",
           "Also estimate the cognitive and execution load (difficulty 0-100):",
-          "0-25 trivial / 26-50 light / 51-75 middle / 76-100 heavy.",
-          'Respond with JSON only: {"category":"<name>","difficulty":<0-100>}',
+          "0-25 trivial / 26-50 light / 51-75 middle / 76-100 heavy,",
+          "and the reasoning effort the answer needs (effort low/medium/high).",
+          'Respond with JSON only: {"category":"<name>","difficulty":<0-100>,"effort":"<low|medium|high>"}',
           "---",
           text.slice(0, 600),
         ].join("\n")
@@ -2811,6 +3075,18 @@ export default Plugin.define({
         ) {
           setSessionLoad(sessionID, loadFromScore(diffRaw), "llm", diffRaw)
         }
+        // v1.1: effort hint from the same LLM call (no extra round trip)
+        if (effortHint === undefined) {
+          const effMatch = /"effort"\s*:\s*"(low|medium|high)"/i.exec(
+            result?.text ?? "",
+          )
+          if (effMatch) {
+            effortHint = { low: 0, medium: 1, high: 2 }[
+              effMatch[1].toLowerCase() as "low" | "medium" | "high"
+            ]
+            logRoute(`EFFORT hint ${effMatch[1]} via llm`)
+          }
+        }
         if (category && categories.includes(category) && !llmCategory) {
           logRoute(`CLASSIFY keyword ${category}`)
         }
@@ -2824,6 +3100,16 @@ export default Plugin.define({
           heuristicLoad(text, category),
           "heuristic",
         )
+      }
+      // v1.1: effort hint for the variant auto-selection. Explicit Jev/LLM
+      // answer wins; otherwise derive from the load band as before.
+      sessionEffort.set(
+        sessionID,
+        effortHint ?? variantBandLevel(sessionLoad.get(sessionID) ?? "middle"),
+      )
+      if (sessionEffort.size > 200) {
+        const oldest = sessionEffort.keys().next().value
+        if (oldest) sessionEffort.delete(oldest)
       }
 
       if (category && categories.includes(category)) {
@@ -3358,7 +3644,7 @@ export default Plugin.define({
 
     const pending = new Map<
       string,
-      { start: number; modelID: string; providerID: string }
+      { start: number; modelID: string; providerID: string; variant?: string }
     >()
     // Recording the actually dispatched model (v0.8.1).
     // - Unswitched sessions have no session.model, so the observation usable for pre-rescue
@@ -3421,6 +3707,8 @@ export default Plugin.define({
         start: performance.now(),
         modelID: event.model.id,
         providerID: event.model.providerID,
+        // v1.1: dispatched variant (for per-(model,variant) outcome learning)
+        variant: event.model?.variant,
       })
     })
 
@@ -3445,6 +3733,14 @@ export default Plugin.define({
         if (clearCooldown(ref))
           logRoute(`RECOVER ok ${ref} (success observation)`)
         await record(observed.modelID, observed.providerID, category, true, ms)
+        // v1.1: per-(model,variant) outcome learning
+        recordVariantOutcome(
+          observed.providerID,
+          observed.modelID,
+          observed.variant,
+          true,
+          ms,
+        )
         void recordTopology(event.sessionID, true, ms)
         // Inner review (shadow): review in the background without blocking the main response
         void runAutoReview(event.sessionID)
@@ -3479,6 +3775,13 @@ export default Plugin.define({
         return
       }
       await record(observed.modelID, observed.providerID, category, false, ms)
+      recordVariantOutcome(
+        observed.providerID,
+        observed.modelID,
+        observed.variant,
+        false,
+        ms,
+      )
       void recordTopology(event.sessionID, false, ms)
       // v1.1: attempt-aware after-fail rescue. Transient failures wait for the
       // attempt budget (attemptGateOpen logs WAIT while letting retries run);
@@ -3882,22 +4185,25 @@ export default Plugin.define({
       // (Free-tier models remain enabled in the catalog but resolve becomes impossible,
       //  so detection is based on failure history = cooldown)
       const rescue = cool(currentRef)
-      // v1.1: reasoning-effort (variant) auto-selection for THIS dispatch.
-      // Applied before the routing pick so the KEEP path (same model, tuned
-      // effort) also benefits. The session/agent's explicit variant always
-      // wins; rescue switches keep the target model's default variant.
-      if (cfg.variantMode === "auto" && !rescue && !event.model.variant) {
-        const load = sessionLoad.get(event.sessionID)
-        const variant = await variantForLoad(
+      // v1.1: reasoning-effort (variant) selection for THIS dispatch.
+      // Model first, then variant: applied to the current (or routed) model.
+      // "auto" = Jev/LLM effort hint + weight-class compensation + exploration
+      // + per-variant learning; "fixed" = cfg.variantFixed (when the model
+      // actually has it). The session/agent's explicit variant always wins;
+      // rescue switches keep the target's default.
+      if (cfg.variantMode !== "off" && !rescue && !event.model.variant) {
+        const picked = await variantForSession(
           event.model.providerID,
           event.model.id,
-          load,
+          event.sessionID,
         )
-        if (variant) {
-          event.model = { ...event.model, variant }
+        if (picked?.variant) {
+          event.model = { ...event.model, variant: picked.variant }
           logRoute(
-            `VARIANT ${event.kind} ${currentRef} -> #${variant} (load=${load ?? "?"}, auto)`,
+            `VARIANT ${event.kind} ${currentRef} -> #${picked.variant} (${picked.note}, load=${sessionLoad.get(event.sessionID) ?? "?"}${sessionEffort.get(event.sessionID) !== undefined ? `, hint=${sessionEffort.get(event.sessionID)}` : ""})`,
           )
+        } else if (picked) {
+          logRoute(`VARIANT ${event.kind} ${currentRef} (${picked.note})`)
         }
       }
       const choice = await pick(
@@ -3925,16 +4231,17 @@ export default Plugin.define({
         // Keep the variant decided above (or the routed model's own best fit
         // when the routed model differs from the current one).
         let variant = event.model.variant
-        if (
-          cfg.variantMode === "auto" &&
-          !variant &&
-          choice.id !== event.model.id
-        ) {
-          variant = await variantForLoad(
+        if (cfg.variantMode !== "off" && !variant && choice.id !== event.model.id) {
+          const picked = await variantForSession(
             choice.providerID,
             choice.id,
-            sessionLoad.get(event.sessionID),
+            event.sessionID,
           )
+          variant = picked?.variant
+          if (variant)
+            logRoute(
+              `VARIANT ${event.kind} ${choice.providerID}/${choice.id} -> #${variant} (${picked?.note}, routed model)`,
+            )
         }
         event.model = {
           providerID: choice.providerID,
@@ -4573,6 +4880,34 @@ export default Plugin.define({
       if (page.entries.length === 0)
         lines.push(tr("(データなし)", "(no data)"))
 
+      // v1.1: per-(model,variant) outcome learning (variantMode auto)
+      const variantPage = await ctx.storage.scan({
+        prefix: VARIANT_PREFIX,
+        limit: 100,
+      })
+      if (variantPage.entries.length > 0) {
+        lines.push(
+          tr(
+            `variant統計 (variantMode auto / 探索ε=${cfg.variantExploreRate})`,
+            `variant stats (variantMode auto / explore ε=${cfg.variantExploreRate})`,
+          ),
+        )
+        const variantEntries = variantPage.entries
+          .map((entry) => entry.value as VariantStat)
+          .filter((s) => s && s.count > 0)
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10)
+        for (const s of variantEntries) {
+          const rate = ((s.ok / s.count) * 100).toFixed(0)
+          const avg = Math.round(s.totalMs / s.count)
+          lines.push(
+            `- ${refFor(s.model.providerID, s.model.id)}#${s.variant}: ${s.count} obs / ok ${rate}% / avg ${avg} ms`,
+          )
+        }
+        if (variantEntries.length === 0)
+          lines.push(tr("(観測なし — ε探索を待機中)", "(no observations — waiting for ε exploration)"))
+      }
+
       const feedbackPage = await ctx.storage.scan({
         prefix: FEEDBACK_PREFIX,
         limit: 100,
@@ -4866,6 +5201,8 @@ export default Plugin.define({
       chainPlans.clear()
       // 負荷帯(v0.8 ティアルーティング)もクリア
       sessionLoad.clear()
+      // variant自動選択のeffortヒント(v1.1)もクリア
+      sessionEffort.clear()
       lastResolved.clear()
     }
 
@@ -4913,7 +5250,16 @@ export default Plugin.define({
       )
         cfg.tierMode = update.tierMode
       if (update.tiers && typeof update.tiers === "object") cfg.tiers = sanitizeTiers(update.tiers)
-      if (update.variantMode === "off" || update.variantMode === "auto") cfg.variantMode = update.variantMode
+      if (
+        update.variantMode === "off" ||
+        update.variantMode === "auto" ||
+        update.variantMode === "fixed"
+      )
+        cfg.variantMode = update.variantMode
+      if (typeof update.variantFixed === "string")
+        cfg.variantFixed = update.variantFixed.length > 0 ? update.variantFixed : null
+      if (update.variantFixed === null) cfg.variantFixed = null
+      if (typeof update.variantExploreRate === "number") cfg.variantExploreRate = clamp(update.variantExploreRate, 0, 1)
       if (
         Array.isArray(update.allowedTopologies) &&
         update.allowedTopologies.every((t) => typeof t === "string")
@@ -5036,6 +5382,7 @@ export default Plugin.define({
       sessionCategory.clear()
       sessionTopology.clear()
       sessionLoad.clear()
+      sessionEffort.clear()
       chainPending.clear()
       chainPlans.clear()
     }

@@ -29,14 +29,30 @@
   (`Model unavailable`, quota) still rescue immediately because retrying them
   cannot succeed. Configurable via plugin options, the config RPC, and
   `/fusion-params` (`rescuattempts`).
-- **Reasoning-effort (thinking level) auto-selection (`variantMode`, default
-  `auto`)**: on every same-provider dispatch, fusion picks the model's own
-  `#variant` by the task's load band — light → lowest effort, middle →
-  median, heavy → highest (`variantEffortRank` scale with unknown ids ranked
-  mid; a model with fewer than 2 variants is left untouched). The user's
-  explicit variant (`ctrl+t`, agent config, session ref) always wins, and
-  rescue switches keep the target model's default variant. Toggle with
-  `/fusion-variantmode`.
+- **Reasoning-effort (thinking level) selection (`variantMode`, default
+  `auto`; also `fixed`)**: model first, then variant. After routing/tier
+  selection has picked the model, the effort level (0 low / 1 medium / 2
+  high) is **asked from Jev in the same round trip as task classification**
+  (no extra API call; the legacy LLM classifier and the load band are the
+  fallbacks), then compensated against the chosen model's weight class —
+  matched pairs keep the provider default, a task heavier than the model
+  compensates with the highest variant (`variantLevelFor`/`variantLevelForLevel`
+  clamps the delta to 0..2), a task lighter than the model drops to the
+  lowest for cost. Model class is the tier membership (manual or
+  benchmark-derived auto tiers) or the benchmark overall score. The variant
+  id itself is positional over the model's own list ranked by an effort scale
+  (`variantEffortRank`, unknown ids mid), so provider-specific naming does not
+  matter; a model with fewer than 2 variants is left untouched. Two
+  anti-ossification mechanisms: ε-greedy exploration
+  (`variantExploreRate`, default 0.1) samples non-computed variants, and
+  per-(model, variant) ok-rates (`fusion/variant/*`, visible in
+  `/fusion-stats`) upgrade the computed pick to an adjacent effort level with
+  a clearly better observed success rate. `variantMode=fixed` (UI: select
+  in `/fusion-variantmode`, e.g. `high`) forces one variant for every
+  same-provider dispatch where the model exposes it. The user's explicit
+  variant (`ctrl+t`, agent config, session ref) always wins, and rescue
+  switches keep the target model's default variant. Tune with
+  `/fusion-params` (`varexplore`).
 - **`/fusion-params`**: `/fusion-weights` renamed — the editor now covers
   non-weight knobs too (`topocalls`, `topo-prior`, `rescuattempts`). The old
   `/fusion-weights` name keeps working as an alias.
@@ -46,9 +62,14 @@
   trace (`heuristic` / `blend` / `explore`) in `/fusion-stats`'s route log
   instead of only `TOPOLOGY single`.
 - Route log now records the wait-for-retry decision (`WAIT ... attempt n/N`,
-  `RETRY ... attempt n/N (no switch)`) so switch storms are diagnosable, and
-  the variant choice as `VARIANT <kind> <ref> -> #<id> (load=<band>)` /
-  `ROUTE ... <ref>#<variant>` when effort auto-selection is active.
+  `RETRY ... attempt n/N (no switch)`) so switch storms are diagnosable, the
+  effort hint (`EFFORT hint <low|medium|high> via jev/llm`) asked in the
+  classification round trip, and the variant choice as
+  `VARIANT <kind> <ref> -> #<id> (<note>, load=<band>, hint=<0..2>)` — the
+  note distinguishes `explore`, `matched <class> (provider default)`,
+  `fixed`, compensated levels and `learned` upgrades — plus
+  `VARIANT obs <ref>#<variant> ok/fail (n/N)` for the per-variant learning
+  records.
 
 ### Fixed
 - Frequent "Switched model to ..." churn: the after-fail event handler

@@ -104,8 +104,12 @@ export const AdaptiveFusion = Rpc.define({
               rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
-              // v1.1: reasoning-effort (variant) auto-selection
-              variantMode: { type: "string", enum: ["off", "auto"] },
+              // v1.1: reasoning-effort (variant) selection
+              variantMode: { type: "string", enum: ["off", "auto", "fixed"] },
+              // v1.1: variant forced in variantMode=fixed (null = unset)
+              variantFixed: { type: ["string", "null"] },
+              // v1.1: ε for exploring non-computed variants (0..1)
+              variantExploreRate: { type: "number" },
               tiers: {
                 type: "object",
                 properties: {
@@ -166,8 +170,12 @@ export const AdaptiveFusion = Rpc.define({
               rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
-              // v1.1: reasoning-effort (variant) auto-selection
-              variantMode: { type: "string", enum: ["off", "auto"] },
+              // v1.1: reasoning-effort (variant) selection
+              variantMode: { type: "string", enum: ["off", "auto", "fixed"] },
+              // v1.1: variant forced in variantMode=fixed (null = unset)
+              variantFixed: { type: ["string", "null"] },
+              // v1.1: ε for exploring non-computed variants (0..1)
+              variantExploreRate: { type: "number" },
               tiers: {
                 type: "object",
                 properties: {
@@ -216,6 +224,8 @@ export const AdaptiveFusion = Rpc.define({
               "chainMode",
               "tierMode",
               "variantMode",
+              "variantFixed",
+              "variantExploreRate",
               "tiers",
               "jevAvailable",
               "lang",
