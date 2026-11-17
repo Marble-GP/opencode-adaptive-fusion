@@ -32,6 +32,10 @@ rate limits, and continuously improves from HTTP outcomes and human/LLM reviews.
 All routing decisions, cooldowns, statistics, reviews and configuration are stored per
 plugin in OpenCode's own key-value store, shared across projects.
 
+**Documentation:** [Installation](#installation) · [Quick start](#quick-start) ·
+[Slash commands](#commands) · [Configuration](#configuration) ·
+[Changelog](CHANGELOG.md)
+
 ---
 
 ## Requirements
@@ -137,13 +141,16 @@ but a restart is the reliable way to pick up everything, including TUI changes.)
 
 ### 4. Verify the installation
 
-Inside OpenCode:
+Inside OpenCode, run these three to confirm the plugin is alive:
 
 | Command | Expected |
 | --- | --- |
-| `/fusion-config` | Shows the current configuration, including whether Jev is available. |
+| `/fusion-config` | Shows the current configuration, routing state and Jev availability. |
 | `/fusion-stats` | Shows accumulated statistics (empty on first run). |
 | `/fusion-toggle` | Flips routing on/off and shows a toast. |
+
+> **All commands:** see the [slash command reference](#commands) for every command —
+> what it shows, what it changes and what it persists.
 
 A footer indicator on the home screen and prompt input shows `● fusion: ON` /
 `○ fusion: OFF` at all times.
@@ -197,7 +204,9 @@ you configure plus optional Jev calls.
    auto-reviews accumulate in the background.
 3. When enough observations exist, enable routing with `/fusion-toggle`.
 4. Review results with `/fusion-stats`, adjust candidates with `/fusion-whitelist`,
-   and rate responses with `/fusion-review`.
+   and rate responses with `/fusion-review`. The [slash command
+   reference](#commands) documents all 17 commands, their dialogs and what each
+   one persists.
 
 **Cost cap is zero by default.** When the whitelist is empty, only models whose
 input/output rates are within `maxInputCost`/`maxOutputCost` are eligible — and the
@@ -218,29 +227,69 @@ internal summary and shadow auto-review prompts ask for.
 ## Commands
 
 Fusion commands run inside the TUI and call the server over RPC. They never send
-messages to the agent and never pollute session history.
+messages to the agent and never pollute session history. Every change is written to
+the `fusion/config` store entry and applies immediately (server-side settings need no
+restart); the `opencode.json` options in [Configuration](#configuration) act as
+defaults only.
 
-| Command | Description |
-| --- | --- |
-| `/fusion-stats` | Show learning statistics (including human rating averages and cost caps). |
-| `/fusion-toggle` | Toggle routing ON/OFF (toast). **OFF stops every model switch** (routing, rescue, restore); passive learning (observation, classification, shadow review, probes) continues in the background. |
-| `/fusion-config` | Show the current configuration. |
-| `/fusion-lang` | Switch the display language of commands and dialogs between Japanese and English (persisted). |
-| `/fusion-costcap` | Edit input/output cost caps used when the whitelist is empty (default `0,0`). |
-| `/fusion-weights` | Adjust routing/topology weights: presets (`balanced` / `cost-first` / `quality-first` / `snappy` / `audit-on`) or `custom` — a searchable, description-annotated picker for all eleven tunables (`cost latency explore learning minobs bench audit topojev topocp topoauto topocalls`), each edited in a prefilled prompt with range validation. |
-| `/fusion-review` | Open the response review panel: summary, 1–5 rating, turn statistics. **Pick a turn to review older responses** (`0 = latest`, `1 = one turn back`, …). |
-| `/fusion-reviewmodel` | Set the shadow auto-review model (`provider/model`; empty clears it). |
-| `/fusion-audit` | Set the auto-review weight (`0` = shadow display only; `0.2` typical when enabled). |
-| `/fusion-jev-key` | Register a Jev (TypeSafe) API key via a dialog (empty clears it). The key is stored server-side; `TYPESAFE_API_KEY` also works. |
-| `/fusion-chainmode` | Toggle sequential-chain planning injection (`off` / `active`). |
-| `/fusion-tiermode` | Cycle tier routing `off → manual → auto`. |
-| `/fusion-tiers` | Edit per-tier model groups (Heavy / Middle / Light, comma-separated; empty clears a tier). |
-| `/fusion-provider` | Change the routing target provider (resets the whitelist). |
-| `/fusion-whitelist` | Edit the candidate whitelist (comma-separated; empty = all eligible candidates + cost caps). |
-| `/fusion-probe` | Send a probe prompt to candidates (records results, applies cooldowns). |
-| `/fusion-reset` | Reset statistics, cooldowns and human ratings (confirmation dialog). |
+**Jump to:** [View & check](#view--check) · [Routing control](#routing-control) ·
+[Score tuning](#score-tuning) · [Topology & tiers](#topology--tiers) ·
+[Review](#review) · [Integration](#integration) · [Maintenance](#maintenance)
 
-TUI changes may require an OpenCode restart to appear.
+### View & check
+
+| Command | What it does | What you see |
+| --- | --- | --- |
+| `/fusion-stats` | Prints the learning report. | Per-model success rate, observations and latency; model and provider cool-downs; human rating averages; active cost caps; benchmark prior (`k`, model count, `fetchedAt`, seed vs auto-refreshed snapshot) and the auto-refresh state with its last result; Jev availability; topology and tier summaries. Read-only. |
+| `/fusion-config` | Prints the effective configuration (saved settings merged over `opencode.json` options). | Provider, whitelist, kinds, routing weights, benchmark settings (`benchAutoUpdate`, auto-refresh mode), review/audit models and weights, topology and tier settings. Read-only — change values with the commands below. |
+| `/fusion-probe` | Sends one test prompt to every candidate model after a confirmation dialog (up to 16 models, 4 in parallel, ~20 s each). | Per-model OK/failure and latency; the run is recorded in the learning statistics and failing models are cooled down. |
+
+### Routing control
+
+| Command | What it does | What it sets (persisted) |
+| --- | --- | --- |
+| `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
+| `/fusion-provider` | Changes the routing target provider (`provider-id`, e.g. `opencode` / `openrouter`). | `providerID`; the whitelist is reset with it, because model ids depend on the provider. |
+| `/fusion-whitelist` | Edits the candidate whitelist (comma-separated). With `crossProvider: true` use full `provider/model-id` refs, otherwise bare model ids. | `models` — empty means all eligible candidates, subject to the cost caps. |
+| `/fusion-costcap` | Edits the `input,output` cost caps (USD / 1M tokens) that apply when the whitelist is empty. | `maxInputCost`, `maxOutputCost` — `0,0` means free models only. |
+
+### Score tuning
+
+| Command | What it does | What it sets (persisted) |
+| --- | --- | --- |
+| `/fusion-weights` | Batch-adjusts the eleven routing/topology coefficients. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. | `costWeight`, `latencyWeight`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls` (aliases: `cost latency explore learning minobs bench audit topojev topocp topoauto topocalls`). |
+| `/fusion-audit` | Sets the weight of the independent audit signal inside the routing quality term. `0` = shadow display only; `0.2` is typical when enabling it. Routing use stays behind gates: N ≥ 10 samples, quality axes only, and the weight is halved when audit vs human scores diverge by \|Δ\| ≥ 1.0. | `autoReviewWeight` (0..1) |
+| `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
+
+### Topology & tiers
+
+| Command | What it does | What it sets (persisted) |
+| --- | --- | --- |
+| `/fusion-chainmode` | Toggles sequential-chain planning injection `off ↔ active`. | `chainMode` — `off` decides and records the shape only; `active` injects the planner plan on chain turns. |
+| `/fusion-tiermode` | Cycles tier routing `off → manual → auto`. | `tierMode` — `manual` uses the groups from `/fusion-tiers`; `auto` trisects candidates by benchmark score. |
+| `/fusion-tiers` | Edits the Heavy / Middle / Light model groups (comma-separated `provider/model` refs). | `tiers` — empty input keeps the current group; enable the result with `/fusion-tiermode manual`. |
+
+### Review
+
+| Command | What it does | What you see / set |
+| --- | --- | --- |
+| `/fusion-review` | Asks for the target turn (`0` = latest, `1` = one turn back, … up to 50), then opens the review panel. | Response summary; shadow auto-review axes (instruction / accuracy / completeness / cost-efficiency) and the enumerated accomplishments; per-turn token, cost and throughput statistics. A 1–5 human rating feeds the learning score. Reviews and ratings are persisted (saved reviews survive `/fusion-reset`; ratings do not). |
+
+### Integration
+
+| Command | What it does | What it sets (persisted) |
+| --- | --- | --- |
+| `/fusion-lang` | Switches the display language of commands, dialogs and statistics between Japanese and English. | `lang` (`ja` / `en`) — survives restarts and also selects the language the internal summary and shadow auto-review prompts ask for. |
+| `/fusion-jev-key` | Registers or clears the Jev (TypeSafe) API key via a dialog. | `fusion/jev-key` — stored server-side only and never exposed to RPC or the display; `TYPESAFE_API_KEY` works as an alternative. The toast reports whether Jev is active under the current configuration (e.g. `jevMode: off`). |
+
+### Maintenance
+
+| Command | What it does | What it sets |
+| --- | --- | --- |
+| `/fusion-reset` | Asks for confirmation, then clears the learning state: per-model/task statistics, human ratings, shadow/audit scores, topology statistics, model and provider cool-downs, and rescue/chain bookkeeping. | Configuration, benchmark snapshots and saved reviews are left untouched. |
+
+TUI changes may require an OpenCode restart to appear. Every option referenced above is
+listed with its default in [Configuration](#configuration).
 
 ---
 

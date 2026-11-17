@@ -1149,7 +1149,7 @@ export default Plugin.define({
                 const input = await context.ui.dialog.prompt({
                   title: `adaptive-fusion ${label} tier`,
                   placeholder:
-                    tr("provider/model をカンマ区切りで(例: openrouter/z-ai/glm-5.3, openrouter/deepseek/...)。空でこのティアをクリア", "Comma-separated provider/model refs (e.g. openrouter/z-ai/glm-5.3, openrouter/deepseek/...). Empty clears this tier"),
+                    tr("provider/model をカンマ区切りで(例: openrouter/z-ai/glm-5.3, openrouter/deepseek/...)。空でこのティアは変更なし", "Comma-separated provider/model refs (e.g. openrouter/z-ai/glm-5.3, openrouter/deepseek/...). Empty keeps this tier unchanged"),
                   default: (current.config.tiers?.[tier as "heavy"] ?? []).join(", "),
                 })
                 if (input === undefined) return // cancel
