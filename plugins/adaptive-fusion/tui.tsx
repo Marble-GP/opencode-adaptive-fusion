@@ -45,7 +45,11 @@ const WEIGHT_FIELDS: {
   min: number
   max: number
   integer?: boolean
-  // What the coefficient means (ja / en)
+  // One-line help shown in the picker row (must stay short: the host renders
+  // title and description on a single line). ja / en
+  sja: string
+  sen: string
+  // Full explanation, shown on demand via the ctrl+h help action. ja / en
   ja: string
   en: string
 }[] = [
@@ -54,6 +58,8 @@ const WEIGHT_FIELDS: {
     server: "costWeight",
     min: 0,
     max: 1,
+    sja: "コストペナルティの重み",
+    sen: "cost penalty weight",
     ja: "コストペナルティの重み。大きいほど安いモデルを優先",
     en: "weight of the cost penalty; higher prefers cheaper models",
   },
@@ -62,6 +68,8 @@ const WEIGHT_FIELDS: {
     server: "latencyWeight",
     min: 0,
     max: 1,
+    sja: "レイテンシペナルティの重み",
+    sen: "latency penalty weight",
     ja: "レイテンシペナルティの重み。大きいほど速いモデルを優先",
     en: "weight of the latency penalty; higher prefers faster models",
   },
@@ -70,6 +78,8 @@ const WEIGHT_FIELDS: {
     server: "exploreRate",
     min: 0,
     max: 1,
+    sja: "定常状態の探索率",
+    sen: "steady-state exploration rate",
     ja: "定常状態の探索率(ε-greedy)。大きいほど多様なモデルを試す",
     en: "steady-state exploration rate (eps-greedy); higher tries more models",
   },
@@ -78,6 +88,8 @@ const WEIGHT_FIELDS: {
     server: "learningRate",
     min: 0,
     max: 1,
+    sja: "学習期間の探索率",
+    sen: "warm-up exploration rate",
     ja: "学習期間の探索率。観測が少ないモデルを優先的に試す",
     en: "exploration rate while models are under-sampled",
   },
@@ -87,6 +99,8 @@ const WEIGHT_FIELDS: {
     min: 1,
     max: 100,
     integer: true,
+    sja: "モデル信頼に必要な最小観測数",
+    sen: "min observations to trust a model",
     ja: "モデルを信頼するまでの最小観測数。小さいほど早く本命選択に移る",
     en: "minimum observations before a model is trusted",
   },
@@ -95,6 +109,8 @@ const WEIGHT_FIELDS: {
     server: "benchmarkPriorWeight",
     min: 0,
     max: 50,
+    sja: "ベンチマーク事前の強さ(k)",
+    sen: "benchmark prior strength (k)",
     ja: "ベンチマーク事前分布の強さ(k)。0 で無効",
     en: "strength (k) of the benchmark prior; 0 disables it",
   },
@@ -103,6 +119,8 @@ const WEIGHT_FIELDS: {
     server: "autoReviewWeight",
     min: 0,
     max: 1,
+    sja: "監査スコアの品質項への重み",
+    sen: "audit score weight in quality term",
     ja: "監査(自動審査)スコアを品質項に混ぜる重み。0 = shadow 表示のみ",
     en: "how much the audit auto-review score mixes into the quality term; 0 = shadow display only",
   },
@@ -111,6 +129,8 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightJev",
     min: 0,
     max: 1,
+    sja: "トポロジー: Jev事前の重み",
+    sen: "topology: Jev prior weight",
     ja: "トポロジー選択での Jev 事前確率の重み",
     en: "weight of the Jev prior in topology selection",
   },
@@ -119,6 +139,8 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightHumanCP",
     min: 0,
     max: 1,
+    sja: "トポロジー: 人間コスパの重み",
+    sen: "topology: human cost-perf weight",
     ja: "トポロジー選択での人間コスパ評価の重み",
     en: "weight of human cost-performance ratings in topology selection",
   },
@@ -127,6 +149,8 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightAuto",
     min: 0,
     max: 1,
+    sja: "トポロジー: 自動観測の重み",
+    sen: "topology: auto-observation weight",
     ja: "トポロジー選択での自動観測(品質/ok率)の重み",
     en: "weight of automatic observations (quality/ok-rate) in topology selection",
   },
@@ -136,6 +160,8 @@ const WEIGHT_FIELDS: {
     min: 1,
     max: 16,
     integer: true,
+    sja: "応答あたりの補助呼出上限",
+    sen: "max auxiliary calls per response",
     ja: "応答あたりの補助呼び出し上限(コストガード)",
     en: "max auxiliary calls per response (cost guard)",
   },
@@ -889,10 +915,11 @@ export default Plugin.define({
                     options: WEIGHT_FIELDS.map((f) => ({
                       title: `${f.alias} = ${(cur as any)[f.server] ?? "-"}`,
                       value: f.alias,
-                      // Help text: what the coefficient means + its range.
+                      // One-line help: kept short so each row stays on one
+                      // line (the host renders title + description inline).
                       description: tr(
-                        `${f.ja}(範囲 ${f.min}〜${f.max}${f.integer ? "・整数" : ""})`,
-                        `${f.en} (${f.min}..${f.max}${f.integer ? ", integer" : ""})`,
+                        `${f.sja}(${f.min}〜${f.max}${f.integer ? "・整数" : ""})`,
+                        `${f.sen} (${f.min}..${f.max}${f.integer ? ", integer" : ""})`,
                       ),
                     })),
                     // Match aliases and description words (e.g. "topo" or "コスト")
@@ -904,11 +931,29 @@ export default Plugin.define({
                             .toLowerCase()
                             .includes(query.toLowerCase()),
                       ),
+                    // Full help on demand, without cluttering the list
+                    actions: [
+                      {
+                        bind: "ctrl+h",
+                        title: tr("help", "help"),
+                        onTrigger: (value) => {
+                          const f = WEIGHT_FIELDS.find(
+                            (x) => x.alias === value,
+                          )
+                          if (!f) return
+                          context.ui.toast.show({
+                            title: `adaptive-fusion: ${f.alias}`,
+                            message: tr(f.ja, f.en),
+                            duration: 8000,
+                          })
+                        },
+                      },
+                    ],
                   })
                   if (!picked) break
                   const field = WEIGHT_FIELDS.find((f) => f.alias === picked)
                   if (!field) break
-                  const help = tr(field.ja, field.en)
+                  const help = tr(field.sja, field.sen)
                   const range = tr(
                     `${field.min}〜${field.max}${field.integer ? "・整数" : ""}`,
                     `${field.min}..${field.max}${field.integer ? ", integer" : ""}`,
