@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v1.1.0 (in development)
+## [1.1.0] - 2026-11-18
 
 ### Added
 - **Task-shape topology prior (v1.1)**: topology selection no longer relies on
