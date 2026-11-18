@@ -83,6 +83,8 @@ export const AdaptiveFusion = Rpc.define({
               classifierModel: { type: ["string", "null"] },
               kinds: { type: "array", items: { type: "string" } },
               models: { type: "array", items: { type: "string" } },
+              // v1.1.1: how the models list is interpreted (whitelist / blacklist)
+              listMode: { type: "string", enum: ["whitelist", "blacklist"] },
               maxInputCost: { type: "number" },
               maxOutputCost: { type: "number" },
               benchmarkPriorWeight: { type: "number" },
@@ -153,6 +155,8 @@ export const AdaptiveFusion = Rpc.define({
               classifierModel: { type: ["string", "null"] },
               kinds: { type: "array", items: { type: "string" } },
               models: { type: "array", items: { type: "string" } },
+              // v1.1.1: how the models list is interpreted (whitelist / blacklist)
+              listMode: { type: "string", enum: ["whitelist", "blacklist"] },
               maxInputCost: { type: "number" },
               maxOutputCost: { type: "number" },
               benchmarkPriorWeight: { type: "number" },
@@ -213,6 +217,7 @@ export const AdaptiveFusion = Rpc.define({
               "classifierModel",
               "kinds",
               "models",
+              "listMode",
               "maxInputCost",
               "maxOutputCost",
               "benchmarkPriorWeight",

@@ -35,6 +35,17 @@
   turns `crossProvider` off. Falls back to the full (emergency-expanded on
   rescue) pool only when every chain entry is exhausted, so replies never
   stop.
+- **`/fusion-modellist` (renamed from `/fusion-whitelist`)**: the model list
+  is now a stack editor with a `⇄ mode` toggle — **whitelist** (default:
+  only listed models are candidates; empty = all + cost caps) or
+  **blacklist** (`listMode`: every candidate except the listed ones, within
+  the cost caps — handy for excluding a few bad models; a bare `model-id`
+  entry excludes that model on every provider; blacklisted models stay
+  excluded even during rescue's emergency expansion). Entries are grouped
+  by provider, added via a typed prompt (Enter to stack), and removable or
+  editable per entry. Toggling the mode clears the list (the meaning
+  inverts, so stale entries are dangerous). The old `/fusion-whitelist`
+  name keeps working as an alias.
 
 ## [1.1.0] - 2026-11-18
 

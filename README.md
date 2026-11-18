@@ -203,16 +203,17 @@ you configure plus optional Jev calls.
 2. Work normally. Routing is **off** by default; success rates, latencies and
    auto-reviews accumulate in the background.
 3. When enough observations exist, enable routing with `/fusion-toggle`.
-4. Review results with `/fusion-stats`, adjust candidates with `/fusion-whitelist`,
+4. Review results with `/fusion-stats`, adjust candidates with `/fusion-modellist`,
    and rate responses with `/fusion-review`. The [slash command
    reference](#commands) documents all 17 commands, their dialogs and what each
    one persists.
 
-**Cost cap is zero by default.** When the whitelist is empty, only models whose
+**Cost cap is zero by default.** When the whitelist is empty (or in blacklist mode), only models whose
 input/output rates are within `maxInputCost`/`maxOutputCost` are eligible — and the
 default of `0,0` means **free models only**. Raise the caps with `/fusion-params`
-(`costin` / `costout`, USD per 1M tokens, e.g. `0.3` / `2.0`) or pin paid models explicitly
-in the whitelist.
+(`costin` / `costout`, USD per 1M tokens, e.g. `0.3` / `2.0`), pin paid models explicitly
+in the whitelist (`/fusion-modellist`), or switch the list to blacklist mode and exclude
+just the models you do not want.
 
 ### Language
 
@@ -241,7 +242,7 @@ defaults only.
 | Command | What it does | What you see |
 | --- | --- | --- |
 | `/fusion-stats` | Prints the learning report. | Per-model success rate, observations and latency; model and provider cool-downs; human rating averages; active cost caps; benchmark prior (`k`, model count, `fetchedAt`, seed vs auto-refreshed snapshot) and the auto-refresh state with its last result; Jev availability; topology and tier summaries. Read-only. |
-| `/fusion-config` | Prints the effective configuration (saved settings merged over `opencode.json` options). | Provider, whitelist, kinds, routing weights, benchmark settings (`benchAutoUpdate`, auto-refresh mode), review/audit models and weights, topology and tier settings. Read-only — change values with the commands below. |
+| `/fusion-config` | Prints the effective configuration (saved settings merged over `opencode.json` options). | Provider (single / chain), model list mode (`listMode`) and entries, kinds, routing weights, benchmark settings (`benchAutoUpdate`, auto-refresh mode), review/audit models and weights, topology and tier settings. Read-only — change values with the commands below. |
 | `/fusion-probe` | Sends one test prompt to every candidate model after a confirmation dialog (up to 16 models, 4 in parallel, ~20 s each). | Per-model OK/failure and latency; the run is recorded in the learning statistics and failing models are cooled down. |
 
 ### Routing control
@@ -250,7 +251,7 @@ defaults only.
 | --- | --- | --- |
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
 | `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window). | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off); the whitelist is reset with it, because model ids depend on the provider. |
-| `/fusion-whitelist` | Edits the candidate whitelist (comma-separated). With `crossProvider: true` use full `provider/model-id` refs, otherwise bare model ids. | `models` — empty means all eligible candidates, subject to the cost caps. |
+| `/fusion-modellist` | Edits the routing model list with a **stack editor**: `➕ add a model` stacks a typed entry (`provider/model-id` recommended, Enter to add), entries are **grouped by provider**, and each entry can be removed or edited from its entry menu. A `⇄ mode` toggle switches between **whitelist** (only listed models are candidates; empty = all candidates + cost caps) and **blacklist** (every candidate **except** the listed ones, within the cost caps — handy for excluding just a few bad models; a bare `model-id` entry excludes that model on every provider). Toggling the mode clears the list (the meaning inverts, so stale entries are dangerous). `/fusion-whitelist` still works as an alias. | `models`, `listMode` — the same `models` field holds the entries in both modes. |
 
 ### Score tuning
 
@@ -303,6 +304,8 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `providerID` | `"opencode"` | Routing target provider. Use `"openrouter"` for OpenRouter-only setups. Changeable at runtime. |
 | `providerChain` | `[]` | Priority-ordered provider fallback chain (e.g. `["opencode-go","opencode","openrouter"]`). Empty = single-provider routing via `providerID`. Candidates come from the first entry with healthy models; exhausted entries (quota / account-wide free-tier cooldown) fall through to the next. Set with the `/fusion-provider` stack editor. |
 | `crossProvider` | `false` | Mix all connected providers when routing. Whitelist then uses full `provider/model-id` references. |
+| `listMode` | `"whitelist"` | How the `models` list is interpreted: `whitelist` = only listed models are candidates (empty = all candidates + cost caps). `blacklist` = every candidate **except** the listed ones — the cost caps always apply, and a blacklisted model stays excluded even during rescue's emergency expansion. Toggle with `/fusion-modellist`. |
+| `models` | `[]` | The routing model list (`listMode` decides the meaning). Whitelist entries use the full `provider/model-id` form; a bare `model-id` matches within any allowed provider (and excludes that model on every provider in blacklist mode). |
 | `enabled` | `false` | Initial routing state (toggle at runtime). |
 | `exploreRate` | `0.05` | ε-greedy exploration rate in steady state. |
 | `learningRate` | `0.3` | Exploration rate during the learning phase. |
@@ -311,7 +314,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `categories` | 6 | `coding / debugging / review / research / writing / ops`. |
 | `costWeight` | `0.1` | Cost penalty weight in the routing score. |
 | `latencyWeight` | `0.05` | Relative latency penalty weight. |
-| `maxInputCost` | `0` | Input cost cap (USD / 1M tokens) when the whitelist is empty. `0` = free models only. |
+| `maxInputCost` | `0` | Input cost cap (USD / 1M tokens) when the whitelist is empty (or always, in blacklist mode). `0` = free models only. |
 | `maxOutputCost` | `0` | Output cost cap (USD / 1M tokens). |
 | `debug` | `false` | Log routing decisions to the server log. |
 | `kinds` | `["primary"]` | Request kinds to route (`primary / compaction / title / generate`). |

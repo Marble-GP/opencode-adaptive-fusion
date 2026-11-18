@@ -210,6 +210,11 @@ type FusionConfig = {
   classifierModel: string | null
   kinds: string[]
   models: string[]
+  // v1.1.1: how the `models` list is interpreted. "whitelist" (default) =
+  // only listed models are candidates (empty = all candidates + cost caps).
+  // "blacklist" = every candidate EXCEPT the listed ones, subject to the cost
+  // caps. The same `models` field holds the entries in both modes.
+  listMode: "whitelist" | "blacklist"
   // Model ID when a single provider is used;
   // full-reference form `provider/model-id` with crossProvider. Empty = all candidates.
   maxInputCost: number // USD/1M tokens. Applied only when the whitelist is empty
@@ -372,6 +377,8 @@ export default Plugin.define({
       // v1.1.1: provider chain (priority-ordered fallback). Set via
       // /fusion-chain; providerID mirrors chain[0] when set.
       providerChain: sanitizeProviderChain(ctx.options.providerChain),
+      // v1.1.1: whitelist / blacklist interpretation of the model list
+      listMode: ctx.options.listMode === "blacklist" ? "blacklist" : "whitelist",
       exploreRate: clamp(num(ctx.options.exploreRate, 0.05), 0, 1),
       learningRate: clamp(num(ctx.options.learningRate, 0.3), 0, 1),
       minObservations: Math.max(
@@ -573,6 +580,9 @@ export default Plugin.define({
       }
       if (Array.isArray(s.models) && s.models.every((m) => typeof m === "string"))
         cfg.models = s.models as string[]
+      // v1.1.1: whitelist/blacklist interpretation of the model list
+      if (s.listMode === "whitelist" || s.listMode === "blacklist")
+        cfg.listMode = s.listMode
       return JSON.stringify(cfg) !== before
     }
 
@@ -1700,6 +1710,11 @@ export default Plugin.define({
     //   Free tier is account-wide, so if the current provider is cooling down on quota
     //   all of its models are down. Rescue needs to fall back to models on other providers
     //   that are "observed to be healthy".
+    // v1.1.1 listMode: "whitelist" (default) = only listed models (empty = all
+    // + cost caps). "blacklist" = every candidate EXCEPT the listed ones;
+    // the cost caps always apply in blacklist mode (the caps guard the
+    // "everything else" pool), and a blacklisted model stays excluded even
+    // during emergency expansion (it is a deliberate user exclusion).
     const candidates = async (expand = false) => {
       const raw: any = await ctx.model.list()
       const models: any[] = Array.isArray(raw)
@@ -1709,8 +1724,11 @@ export default Plugin.define({
           : Array.isArray(raw?.models)
             ? raw.models
             : []
-      const whitelist = new Set(cfg.models)
-      const costLimitsApply = whitelist.size === 0
+      const blacklistMode = cfg.listMode === "blacklist"
+      const list = new Set(cfg.models)
+      // The cost caps apply when they are the only guard (empty whitelist, or
+      // blacklist mode where the pool is "everything else").
+      const costLimitsApply = blacklistMode || list.size === 0
       const costOK = (m: any) => {
         const tier = m.cost?.[0]
         if (!tier) return false
@@ -1723,6 +1741,13 @@ export default Plugin.define({
           output <= cfg.maxOutputCost
         )
       }
+      // v1.1.1: blacklist exclusion. Entries match the full
+      // `provider/model-id` form and the bare `model-id` form (a bare id
+      // excludes that model on every provider — handy for blocking one
+      // model family everywhere).
+      const excluded = (m: any) =>
+        blacklistMode &&
+        (list.has(refFor(m.providerID, m.id)) || list.has(m.id))
       // v1.1.1: provider chain scoping. With a chain set, candidates come
       // from the chain's providers only (priority narrowing happens later in
       // pick()). The whitelist accepts full `provider/model` refs and bare
@@ -1732,29 +1757,39 @@ export default Plugin.define({
           ? new Set(cfg.providerChain)
           : undefined
       const inWhitelist = (m: any) =>
-        whitelist.size === 0 ||
-        whitelist.has(refFor(m.providerID, m.id)) ||
-        whitelist.has(m.id)
+        list.size === 0 ||
+        list.has(refFor(m.providerID, m.id)) ||
+        list.has(m.id)
       return models.filter(
         (m) =>
           m.enabled !== false &&
           Array.isArray(m.cost) &&
           m.cost.length > 0 &&
+          !excluded(m) &&
           (!costLimitsApply || costOK(m)) &&
           (expand
             ? // Emergency expansion (v0.8.1): goes beyond the whitelist, but applies costOK
               // to keep seamless fallback to paid models within the user's budget.
-              // Free models are unaffected by the cap and pass through as-is
-              whitelist.size === 0 ||
-              whitelist.has(refFor(m.providerID, m.id)) ||
+              // Free models are unaffected by the cap and pass through as-is.
+              // Blacklisted models stay excluded (deliberate user exclusion).
+              blacklistMode ||
+              list.size === 0 ||
+              list.has(refFor(m.providerID, m.id)) ||
               costOK(m)
-            : chainSet
-              ? chainSet.has(m.providerID) && inWhitelist(m)
-              : cfg.crossProvider
-                ? whitelist.size === 0 ||
-                  whitelist.has(refFor(m.providerID, m.id))
-                : m.providerID === cfg.providerID &&
-                  (whitelist.size === 0 || whitelist.has(m.id))),
+            : blacklistMode
+              ? // Blacklist mode: chain/provider scope still applies; the
+                // entries themselves are exclusions, not an allowlist.
+                chainSet
+                  ? chainSet.has(m.providerID)
+                  : cfg.crossProvider ||
+                    m.providerID === cfg.providerID
+              : chainSet
+                ? chainSet.has(m.providerID) && inWhitelist(m)
+                : cfg.crossProvider
+                  ? list.size === 0 ||
+                    list.has(refFor(m.providerID, m.id))
+                  : m.providerID === cfg.providerID &&
+                    (list.size === 0 || list.has(m.id))),
       )
     }
     // ------------------------------------------------------------------
@@ -5169,9 +5204,9 @@ export default Plugin.define({
       lines.push(
         tr(
           `(コスト上限: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
-            `${cfg.models.length === 0 ? " — ホワイトリスト空時に適用" : " (ホワイトリスト優先)"})`,
+            `${cfg.listMode === "blacklist" ? " — ブラックリストモードでは常に適用" : cfg.models.length === 0 ? " — リスト空時に適用" : " (ホワイトリスト優先)"})`,
           `(cost cap: input ${cfg.maxInputCost} / output ${cfg.maxOutputCost} USD/Mtoken` +
-            `${cfg.models.length === 0 ? " — applied when the whitelist is empty" : " (whitelist takes precedence)"})`,
+            `${cfg.listMode === "blacklist" ? " — always applied in blacklist mode" : cfg.models.length === 0 ? " — applied when the list is empty" : " (whitelist takes precedence)"})`,
         ),
       )
       if (!cfg.enabled)
@@ -5808,6 +5843,9 @@ export default Plugin.define({
       }
       if (Array.isArray(update.models) && update.models.every((m) => typeof m === "string"))
         cfg.models = update.models as string[]
+      // v1.1.1: whitelist/blacklist interpretation of the model list
+      if (update.listMode === "whitelist" || update.listMode === "blacklist")
+        cfg.listMode = update.listMode
       // Display language (v0.9.0). Default per install is options.lang,
       // but the switch with /fusion-lang is persisted and reflected in later display.
       if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang

@@ -8,7 +8,8 @@
 // /fusion-toggle     Toggle routing ON/OFF
 // /fusion-config     Show the current configuration
 // /fusion-provider   Change the routing target provider (stack UI: add entries, swap up/down; 2+ entries form a priority chain)
-// /fusion-whitelist  Edit the whitelist of routing candidate models
+// /fusion-modellist Edit the model list (whitelist/blacklist mode, provider-grouped stack editor)
+//                    (/fusion-whitelist works as an alias)
 // /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
 //                    (/fusion-weights works as an alias; includes cost caps and the former /fusion-audit)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
@@ -259,6 +260,8 @@ type FusionConfig = {
   classifierModel?: string | null
   kinds?: string[]
   models?: string[]
+  // v1.1.1: how the models list is interpreted (whitelist / blacklist)
+  listMode?: "whitelist" | "blacklist"
   maxInputCost?: number
   maxOutputCost?: number
   benchmarkPriorWeight?: number
@@ -318,7 +321,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${T("(ホワイトリスト空時のみ)", " (only when the whitelist is empty)")}`,
     `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}${c.benchAutoUpdate === false ? " / auto-refresh OFF" : c.benchAutoUpdate === true ? (c.benchmarksFile ? " / auto-refresh skipped (custom file)" : " / auto-refresh ON (daily)") : ""}`,
     `kinds         : ${(c.kinds ?? []).join(", ")}`,
-    `models(white) : ${(c.models ?? []).length === 0 ? T("(全候補 + コスト上限)", "(all candidates + cost cap)") : (c.models ?? []).join(", ")}`,
+    `models        : ${c.listMode === "blacklist" ? T("ブラックリスト(リスト以外はコスト上限内で全候補)", "blacklist (everything except the list, within the cost caps)") : T("ホワイトリスト", "whitelist")} — ${(c.models ?? []).length === 0 ? (c.listMode === "blacklist" ? T("(無効=全候補)", "(inactive = all candidates)") : T("(全候補 + コスト上限)", "(all candidates + cost cap)")) : (c.models ?? []).join(", ")}`,
   ]
   return lines.join("\n")
 }
@@ -938,6 +941,263 @@ export default Plugin.define({
       }
     }
 
+    // /fusion-modellist (v1.1.1: renamed from /fusion-whitelist): stack editor
+    // with a whitelist/blacklist mode toggle and provider-grouped entries.
+    // Defined once; /fusion-whitelist reuses it as an alias.
+    async function fusionModelListDialog() {
+      try {
+        const current = await fusion.config({}, { location: location() })
+        const seedMode = current.config.listMode ?? "whitelist"
+        const seedList = [...(current.config.models ?? [])]
+        let mode: "whitelist" | "blacklist" = seedMode
+        let list: string[] = [...seedList]
+        let focusIndex = -1
+        let modeToggled = false
+
+        const entryCategory = (entry: string) => {
+          const slash = entry.indexOf("/")
+          return slash > 0
+            ? entry.slice(0, slash)
+            : (current.config.providerID ?? "provider")
+        }
+
+        const addModel = async (): Promise<void> => {
+          const input = await context.ui.dialog.prompt({
+            title: tr(
+              "adaptive-fusion: モデルを入力(例: opencode-go/qwen4-max)",
+              "adaptive-fusion: enter a model (e.g. opencode-go/qwen4-max)",
+            ),
+            placeholder: tr(
+              "provider/model-id(推奨)または model-id。入力して Enter でリストに追加",
+              "provider/model-id (recommended) or model-id. Enter to add it to the list",
+            ),
+          })
+          if (input === undefined) return
+          const entry = input.trim()
+          if (entry.length === 0) return
+          if (list.includes(entry)) {
+            context.ui.toast.show({
+              message: tr(
+                `${entry} は既にリストに含まれています`,
+                `${entry} is already in the list`,
+              ),
+              variant: "error",
+            })
+            return
+          }
+          if (list.length >= 200) {
+            context.ui.toast.show({
+              message: tr(
+                "リストは最大200件です",
+                "the list holds at most 200 entries",
+              ),
+              variant: "error",
+            })
+            return
+          }
+          list.push(entry)
+          focusIndex = list.length - 1
+        }
+
+        for (;;) {
+          // Group entries by provider (stable: list order kept within a group)
+          const byProvider = new Map<string, number[]>()
+          list.forEach((entry, i) => {
+            const cat = entryCategory(entry)
+            if (!byProvider.has(cat)) byProvider.set(cat, [])
+            byProvider.get(cat)!.push(i)
+          })
+          const groupOrder = [...byProvider.keys()].sort()
+          const picked = await context.ui.dialog.select({
+            title: tr(
+              `モデルリスト(${mode === "blacklist" ? "ブラックリスト: リスト以外を利用" : "ホワイトリスト: リストのみ利用"} / Esc で終了)`,
+              `Model list (${mode === "blacklist" ? "blacklist: everything except the list" : "whitelist: only the list"} / Esc to finish)`,
+            ),
+            ...(focusIndex >= 0 && focusIndex < list.length
+              ? { current: `item:${focusIndex}` }
+              : {}),
+            options: [
+              {
+                title: tr(
+                  `⇄ モード: ${mode === "blacklist" ? "ブラックリスト" : "ホワイトリスト"}(切替)`,
+                  `⇄ mode: ${mode === "blacklist" ? "blacklist" : "whitelist"} (toggle)`,
+                ),
+                value: "mode",
+                category: tr("操作", "actions"),
+                description: tr(
+                  mode === "blacklist"
+                    ? "現在: リスト以外の全候補(コスト上限内)を利用 → ホワイトリストへ"
+                    : "現在: リストのモデルのみ利用 → ブラックリストへ(リストは消去)",
+                  mode === "blacklist"
+                    ? "now: every candidate except the list (within cost caps) -> whitelist"
+                    : "now: only the listed models -> blacklist (list is cleared)",
+                ),
+              },
+              ...groupOrder.flatMap((cat) =>
+                byProvider.get(cat)!.map((i) => ({
+                  title: list[i],
+                  value: `item:${i}`,
+                  category: cat,
+                  description:
+                    mode === "blacklist"
+                      ? tr("除外対象(候補から除く)", "excluded (kept out of candidates)")
+                      : tr("候補として許可", "allowed as a candidate"),
+                })),
+              ),
+              {
+                title: tr("➕ モデルを追加", "➕ add a model"),
+                value: "add",
+                category: tr("操作", "actions"),
+                description: tr(
+                  "入力して Enter で追加(provider/model-id 推奨)",
+                  "type and press Enter (provider/model-id recommended)",
+                ),
+              },
+              ...(list.length > 0
+                ? [
+                    {
+                      title: tr("✕ リストを全消去", "✕ clear the list"),
+                      value: "clear",
+                      category: tr("操作", "actions") as string,
+                      description: tr(
+                        "すべてのエントリを削除",
+                        "remove every entry",
+                      ) as string,
+                    },
+                  ]
+                : []),
+              {
+                title: tr("✔ 完了(保存して終了)", "✔ done (save and finish)"),
+                value: "done",
+                category: tr("操作", "actions"),
+                description: tr(
+                  "リストとモードを保存(Esc でも終了)",
+                  "save the list and mode (Esc also finishes)",
+                ),
+              },
+            ],
+          })
+          if (!picked || picked === "done") break
+          if (picked === "mode") {
+            mode = mode === "blacklist" ? "whitelist" : "blacklist"
+            // Toggling reinterprets every entry: clear to avoid accidentally
+            // blocking the old allowlist (confirm first).
+            if (list.length > 0) {
+              const ok = await context.ui.dialog.confirm({
+                title: tr("モデルリストのモード切替", "Model list mode toggle"),
+                message: tr(
+                  "モードを切り替えるとリストの意味が反転します。現在のリストを消去しますか?(キャンセルでモード切替も中止)",
+                  "Toggling the mode inverts the meaning of the list. Clear the current list? (Cancel aborts the toggle.)",
+                ),
+                label: { confirm: tr("消去して切替", "Clear and toggle"), cancel: "Cancel" },
+              })
+              if (!ok) {
+                mode = mode === "blacklist" ? "whitelist" : "blacklist"
+                continue
+              }
+              list = []
+              focusIndex = -1
+            }
+            modeToggled = true
+            continue
+          }
+          if (picked === "add") {
+            await addModel()
+            continue
+          }
+          if (picked === "clear") {
+            list = []
+            focusIndex = -1
+            continue
+          }
+          const m = /^item:(\d+)$/.exec(picked)
+          if (!m) continue
+          const index = Number(m[1])
+          if (index < 0 || index >= list.length) continue
+          focusIndex = index
+          const action = await context.ui.dialog.select({
+            title: list[index],
+            current: "remove",
+            options: [
+              {
+                title: tr("✕ リストから削除", "✕ remove from the list"),
+                value: "remove",
+                description:
+                  mode === "blacklist"
+                    ? tr("除外を解除し候補に戻す", "lift the exclusion; it becomes a candidate again")
+                    : tr("候補から外す", "drop it from the candidates"),
+              },
+              {
+                title: tr("✏ エントリを編集", "✏ edit the entry"),
+                value: "edit",
+                description: tr("provider/model-id を修正", "fix the provider/model-id"),
+              },
+              {
+                title: tr("← 戻る", "← back"),
+                value: "back",
+                category: tr("操作", "actions"),
+                description: tr("リストに戻る", "back to the list"),
+              },
+            ],
+          })
+          if (!action || action === "back") continue
+          if (action === "remove") {
+            list.splice(index, 1)
+            focusIndex = Math.min(index, list.length - 1)
+          } else if (action === "edit") {
+            const input = await context.ui.dialog.prompt({
+              title: tr("adaptive-fusion: エントリを編集", "adaptive-fusion: edit the entry"),
+              placeholder: "provider/model-id",
+              default: list[index],
+            })
+            if (input === undefined) continue
+            const entry = input.trim()
+            if (entry.length === 0 || entry === list[index]) continue
+            if (list.includes(entry)) {
+              context.ui.toast.show({
+                message: tr(
+                  `${entry} は既にリストに含まれています`,
+                  `${entry} is already in the list`,
+                ),
+                variant: "error",
+              })
+              continue
+            }
+            list[index] = entry
+          }
+        }
+
+        const unchanged =
+          !modeToggled &&
+          JSON.stringify(list) === JSON.stringify(seedList)
+        if (unchanged) return
+        const result = await fusion.config(
+          { update: { models: list, listMode: mode } },
+          { location: location() },
+        )
+        const c = result.config
+        const entries = c.models ?? []
+        context.ui.toast.show({
+          message:
+            c.listMode === "blacklist"
+              ? tr(
+                  `blacklist: ${entries.length}件除外(それ以外はコスト上限内で全候補)`,
+                  `blacklist: ${entries.length} excluded (everything else, within cost caps)`,
+                )
+              : entries.length === 0
+                ? tr("whitelist: (空=全候補+コスト上限)", "whitelist: (empty = all candidates + cost caps)")
+                : tr(`whitelist: ${entries.length}件`, `whitelist: ${entries.length} entries`),
+          variant: "success",
+        })
+        showLongText("adaptive-fusion config", formatConfig(c, lang() === "en"))
+      } catch (error) {
+        context.ui.toast.show({
+          message: `fusion-modellist: ${errorText(error)}`,
+          variant: "error",
+        })
+      }
+    }
+
     context.keymap.layer(() => ({
       mode: "global",
       commands: [
@@ -1375,46 +1635,25 @@ export default Plugin.define({
           },
         },
         {
+          // v1.1.1: renamed from /fusion-whitelist. Stack editor with a
+          // whitelist/blacklist mode toggle and provider-grouped entries.
+          id: "fusion.modellist",
+          title: tr(
+            "adaptive-fusion: モデルリスト編集(ホワイト/ブラックリスト・プロバイダー別)",
+            "adaptive-fusion: edit the model list (whitelist/blacklist, grouped by provider)",
+          ),
+          slash: { name: "fusion-modellist" },
+          run: () => fusionModelListDialog(),
+        },
+        {
+          // v1.1.1: legacy alias of /fusion-modellist.
           id: "fusion.whitelist",
-          title: tr("adaptive-fusion: ルーティング候補モデルのホワイトリスト編集", "adaptive-fusion: edit the routing candidate whitelist"),
+          title: tr(
+            "adaptive-fusion: モデルリスト編集(/fusion-modellist と同じ)",
+            "adaptive-fusion: edit the model list (same as /fusion-modellist)",
+          ),
           slash: { name: "fusion-whitelist" },
-          run: async () => {
-            try {
-              const current = await fusion.config({}, { location: location() })
-              const cross = current.config.crossProvider === true
-              const currentText = (current.config.models ?? []).join(", ")
-              const input = await context.ui.dialog.prompt({
-                title: "adaptive-fusion whitelist",
-                placeholder: cross
-                  ? tr("provider/model-id, ... (空で全候補 例: openrouter/z-ai/glm-4.6)", "provider/model-id, ... (empty = all candidates, e.g. openrouter/z-ai/glm-4.6)")
-                  : tr("model-id-1, model-id-2 (空で全候補)", "model-id-1, model-id-2 (empty = all candidates)"),
-                ...(currentText ? { default: currentText } : {}),
-              })
-              if (input === undefined) return
-              const models = input
-                .split(",")
-                .map((s) => s.trim())
-                .filter((s) => s.length > 0)
-              const result = await fusion.config(
-                { update: { models } },
-                { location: location() },
-              )
-              context.ui.toast.show({
-                message: `whitelist: ${
-                  models.length === 0 ? tr("(全候補)", "(all candidates)") : models.join(", ")
-                }`,
-                variant: "success",
-              })
-              if (result.config) {
-                showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
-              }
-            } catch (error) {
-              context.ui.toast.show({
-                message: `fusion-whitelist: ${errorText(error)}`,
-                variant: "error",
-              })
-            }
-          },
+          run: () => fusionModelListDialog(),
         },
         {
           id: "fusion.provider",

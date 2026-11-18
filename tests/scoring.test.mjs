@@ -576,6 +576,26 @@ check("chain: all exhausted -> -1", firstHealthyChainIndex([P("anthropic")], ["o
 check("chain: empty chain -> -1", firstHealthyChainIndex([P("opencode-go")], [], okM), -1);
 check("chain: out-of-chain candidates ignored", firstHealthyChainIndex([P("anthropic"), P("opencode")], ["opencode-go", "opencode"], okM), 1);
 
+// --- Model list mode (mirror of the candidates() list predicate, v1.1.1) ---
+// whitelist: only listed models (empty = all); blacklist: everything except
+// the listed ones. Entries match the full `provider/model-id` form and the
+// bare `model-id` form (a bare id matches/excludes that model on every
+// provider).
+const listAllows = (listMode, list, providerID, modelID) => {
+  const full = `${providerID}/${modelID}`;
+  if (listMode === "blacklist")
+    return !list.includes(full) && !list.includes(modelID);
+  return list.length === 0 || list.includes(full) || list.includes(modelID);
+};
+check("whitelist: empty list allows all", listAllows("whitelist", [], "opencode-go", "qwen4-max"), true);
+check("whitelist: full ref allows", listAllows("whitelist", ["opencode-go/qwen4-max"], "opencode-go", "qwen4-max"), true);
+check("whitelist: bare id allows", listAllows("whitelist", ["qwen4-max"], "opencode-go", "qwen4-max"), true);
+check("whitelist: unlisted denied", listAllows("whitelist", ["opencode-go/qwen4-max"], "opencode", "iceman-free"), false);
+check("blacklist: empty list allows all", listAllows("blacklist", [], "opencode", "iceman-free"), true);
+check("blacklist: full ref excludes", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode-go", "qwen4-max"), false);
+check("blacklist: bare id excludes across providers", listAllows("blacklist", ["iceman-free"], "opencode", "iceman-free"), false);
+check("blacklist: others allowed", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode", "iceman-free"), true);
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);
