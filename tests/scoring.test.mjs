@@ -588,12 +588,17 @@ check(
 // whitelist: only listed models (empty = all); blacklist: everything except
 // the listed ones. Entries match the full `provider/model-id` form and the
 // bare `model-id` form (a bare id matches/excludes that model on every
-// provider).
+// provider), with the `:free` suffix normalized away (mirror of listHas).
+const normRefOf = (ref) => ref.replace(/:free$/, "");
 const listAllows = (listMode, list, providerID, modelID) => {
   const full = `${providerID}/${modelID}`;
-  if (listMode === "blacklist")
-    return !list.includes(full) && !list.includes(modelID);
-  return list.length === 0 || list.includes(full) || list.includes(modelID);
+  const has =
+    list.includes(full) ||
+    list.includes(normRefOf(full)) ||
+    list.includes(modelID) ||
+    list.includes(normRefOf(modelID));
+  if (listMode === "blacklist") return !has;
+  return list.length === 0 || has;
 };
 check("whitelist: empty list allows all", listAllows("whitelist", [], "opencode-go", "qwen4-max"), true);
 check("whitelist: full ref allows", listAllows("whitelist", ["opencode-go/qwen4-max"], "opencode-go", "qwen4-max"), true);
@@ -603,6 +608,8 @@ check("blacklist: empty list allows all", listAllows("blacklist", [], "opencode"
 check("blacklist: full ref excludes", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode-go", "qwen4-max"), false);
 check("blacklist: bare id excludes across providers", listAllows("blacklist", ["iceman-free"], "opencode", "iceman-free"), false);
 check("blacklist: others allowed", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode", "iceman-free"), true);
+check("whitelist: :free suffix normalized", listAllows("whitelist", ["opencode/iceman"], "opencode", "iceman-free"), true);
+check("blacklist: :free suffix normalized", listAllows("blacklist", ["opencode/iceman"], "opencode", "iceman-free"), false);
 
 
 if (failures > 0) {

@@ -1763,21 +1763,25 @@ export default Plugin.define({
       // `provider/model-id` form and the bare `model-id` form (a bare id
       // excludes that model on every provider — handy for blocking one
       // model family everywhere).
-      const excluded = (m: any) =>
-        blacklistMode &&
-        (list.has(refFor(m.providerID, m.id)) || list.has(m.id))
+      const excluded = (m: any) => blacklistMode && listHas(m)
       // v1.1.1: provider chain scoping. With a chain set, candidates come
       // from the chain's providers only (priority narrowing happens later in
       // pick()). The whitelist accepts full `provider/model` refs and bare
-      // model ids (matched within chain providers).
+      // model ids (matched within chain providers). The `:free` suffix is
+      // normalized away (same as tier matching), so an entry without the
+      // exact suffix still matches its free model.
+      const normListRef = (ref: string) => ref.replace(/:free$/, "")
+      const listHas = (m: any) =>
+        list.has(refFor(m.providerID, m.id)) ||
+        list.has(normListRef(refFor(m.providerID, m.id))) ||
+        list.has(m.id) ||
+        list.has(normListRef(m.id))
       const chainSet =
         cfg.providerChain.length > 0
           ? new Set(cfg.providerChain)
           : undefined
       const inWhitelist = (m: any) =>
-        list.size === 0 ||
-        list.has(refFor(m.providerID, m.id)) ||
-        list.has(m.id)
+        list.size === 0 || listHas(m)
       return models.filter(
         (m) =>
           m.enabled !== false &&
@@ -1789,12 +1793,12 @@ export default Plugin.define({
             ? // Emergency expansion (v0.8.1): goes beyond the whitelist, but applies costOK
               // to keep seamless fallback to paid models within the user's budget.
               // Free models are unaffected by the cap and pass through as-is
-              // (v1.1.1: both entry forms match, like the normal branches).
+              // (v1.1.1: both entry forms match, like the normal branches;
+              //  :free suffix normalized).
               // Blacklisted models stay excluded (deliberate user exclusion).
               blacklistMode ||
               list.size === 0 ||
-              list.has(refFor(m.providerID, m.id)) ||
-              list.has(m.id) ||
+              listHas(m) ||
               costOK(m)
             : blacklistMode
               ? // Blacklist mode: chain/provider scope still applies; the
@@ -1806,14 +1810,11 @@ export default Plugin.define({
               : chainSet
                 ? chainSet.has(m.providerID) && inWhitelist(m)
                 : cfg.crossProvider
-                  ? list.size === 0 ||
-                    list.has(refFor(m.providerID, m.id))
+                  ? list.size === 0 || listHas(m)
                   : m.providerID === cfg.providerID &&
                     // v1.1.1: accept both entry forms (the /fusion-modellist UI
                     // recommends provider/model-id even in single-provider mode)
-                    (list.size === 0 ||
-                      list.has(m.id) ||
-                      list.has(refFor(m.providerID, m.id)))),
+                    (list.size === 0 || listHas(m))),
       )
     }
     // ------------------------------------------------------------------
