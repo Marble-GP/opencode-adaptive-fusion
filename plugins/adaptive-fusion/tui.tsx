@@ -9,7 +9,6 @@
 // /fusion-config     Show the current configuration
 // /fusion-provider   Change the routing target provider (stack UI: add entries, swap up/down; 2+ entries form a priority chain)
 // /fusion-modellist Edit the model list (whitelist/blacklist mode, provider-grouped stack editor)
-//                    (/fusion-whitelist works as an alias)
 // /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
 //                    (/fusion-weights works as an alias; includes cost caps and the former /fusion-audit)
 // /fusion-review     Summarize a response / rate model and topology cost-performance (1-5 each). Supports retroactive review by turn offset
@@ -941,9 +940,8 @@ export default Plugin.define({
       }
     }
 
-    // /fusion-modellist (v1.1.1: renamed from /fusion-whitelist): stack editor
+    // /fusion-modellist (v1.1.1: replaced /fusion-whitelist): stack editor
     // with a whitelist/blacklist mode toggle and provider-grouped entries.
-    // Defined once; /fusion-whitelist reuses it as an alias.
     async function fusionModelListDialog() {
       try {
         const current = await fusion.config({}, { location: location() })
@@ -1643,16 +1641,6 @@ export default Plugin.define({
             "adaptive-fusion: edit the model list (whitelist/blacklist, grouped by provider)",
           ),
           slash: { name: "fusion-modellist" },
-          run: () => fusionModelListDialog(),
-        },
-        {
-          // v1.1.1: legacy alias of /fusion-modellist.
-          id: "fusion.whitelist",
-          title: tr(
-            "adaptive-fusion: モデルリスト編集(/fusion-modellist と同じ)",
-            "adaptive-fusion: edit the model list (same as /fusion-modellist)",
-          ),
-          slash: { name: "fusion-whitelist" },
           run: () => fusionModelListDialog(),
         },
         {

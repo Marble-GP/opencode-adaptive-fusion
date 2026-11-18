@@ -44,8 +44,8 @@
   excluded even during rescue's emergency expansion). Entries are grouped
   by provider, added via a typed prompt (Enter to stack), and removable or
   editable per entry. Toggling the mode clears the list (the meaning
-  inverts, so stale entries are dangerous). The old `/fusion-whitelist`
-  name keeps working as an alias.
+  inverts, so stale entries are dangerous). The `/fusion-whitelist` command
+  was removed (it renamed into `/fusion-modellist`).
 
 ## [1.1.0] - 2026-11-18
 
