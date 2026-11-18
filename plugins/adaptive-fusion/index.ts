@@ -193,6 +193,15 @@ type FusionConfig = {
   enabled: boolean
   providerID: string
   crossProvider: boolean
+  // v1.1.1: priority-ordered provider fallback chain. Empty = legacy single
+  // providerID routing. When set, routing considers only these providers (in
+  // order): candidates come from the first chain entry that still has healthy
+  // (non-cooling) models; when that provider is exhausted (quota / account-
+  // wide free-tier cooldown), the next entry takes over. Falling back records
+  // the original model as a restore candidate, so the session returns to it
+  // once it recovers (existing rescue-restore, 24 h window). The primary
+  // (chain[0]) is mirrored into providerID for display and legacy fallback.
+  providerChain: string[]
   exploreRate: number
   learningRate: number
   minObservations: number
@@ -283,6 +292,21 @@ const TIER_NAMES: TierName[] = ["heavy", "middle", "light"]
 const TIER_THRESHOLD_MIDDLE = 34
 const TIER_THRESHOLD_HEAVY = 67
 
+// v1.1.1: provider chain sanitization. Non-empty strings only, deduped
+// (first occurrence wins), capped at 8 entries.
+const sanitizeProviderChain = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return []
+  const out: string[] = []
+  for (const v of value) {
+    if (typeof v !== "string") continue
+    const trimmed = v.trim()
+    if (trimmed.length === 0 || out.includes(trimmed)) continue
+    out.push(trimmed)
+    if (out.length >= 8) break
+  }
+  return out
+}
+
 // Inner review (autoReview) skip log (A-2).
 // Persists the fact that a review could not run (with reviewerRef),
 // surfacing the blind spots of the shadow aggregation (missed reviews).
@@ -345,6 +369,9 @@ export default Plugin.define({
           ? ctx.options.providerID
           : "opencode",
       crossProvider: ctx.options.crossProvider === true,
+      // v1.1.1: provider chain (priority-ordered fallback). Set via
+      // /fusion-chain; providerID mirrors chain[0] when set.
+      providerChain: sanitizeProviderChain(ctx.options.providerChain),
       exploreRate: clamp(num(ctx.options.exploreRate, 0.05), 0, 1),
       learningRate: clamp(num(ctx.options.learningRate, 0.3), 0, 1),
       minObservations: Math.max(
@@ -457,6 +484,9 @@ export default Plugin.define({
       if (typeof s.enabled === "boolean") cfg.enabled = s.enabled
       if (typeof s.providerID === "string") cfg.providerID = s.providerID
       if (typeof s.crossProvider === "boolean") cfg.crossProvider = s.crossProvider
+      // v1.1.1: provider chain restore
+      if (Array.isArray(s.providerChain))
+        cfg.providerChain = sanitizeProviderChain(s.providerChain)
       if (typeof s.exploreRate === "number")
         cfg.exploreRate = clamp(s.exploreRate, 0, 1)
       if (typeof s.learningRate === "number")
@@ -1693,6 +1723,18 @@ export default Plugin.define({
           output <= cfg.maxOutputCost
         )
       }
+      // v1.1.1: provider chain scoping. With a chain set, candidates come
+      // from the chain's providers only (priority narrowing happens later in
+      // pick()). The whitelist accepts full `provider/model` refs and bare
+      // model ids (matched within chain providers).
+      const chainSet =
+        cfg.providerChain.length > 0
+          ? new Set(cfg.providerChain)
+          : undefined
+      const inWhitelist = (m: any) =>
+        whitelist.size === 0 ||
+        whitelist.has(refFor(m.providerID, m.id)) ||
+        whitelist.has(m.id)
       return models.filter(
         (m) =>
           m.enabled !== false &&
@@ -1706,11 +1748,13 @@ export default Plugin.define({
               whitelist.size === 0 ||
               whitelist.has(refFor(m.providerID, m.id)) ||
               costOK(m)
-            : cfg.crossProvider
-              ? whitelist.size === 0 ||
-                whitelist.has(refFor(m.providerID, m.id))
-              : m.providerID === cfg.providerID &&
-                (whitelist.size === 0 || whitelist.has(m.id))),
+            : chainSet
+              ? chainSet.has(m.providerID) && inWhitelist(m)
+              : cfg.crossProvider
+                ? whitelist.size === 0 ||
+                  whitelist.has(refFor(m.providerID, m.id))
+                : m.providerID === cfg.providerID &&
+                  (whitelist.size === 0 || whitelist.has(m.id))),
       )
     }
     // ------------------------------------------------------------------
@@ -4199,6 +4243,21 @@ export default Plugin.define({
       return score - cfg.costWeight * refCost
     }
 
+    // v1.1.1: provider-chain priority (pure helper, mirrored in tests).
+    // Returns the index of the first chain entry that still has at least one
+    // eligible candidate, or -1 when every entry is exhausted.
+    const firstHealthyChainIndex = (
+      models: { providerID: string }[],
+      chain: string[],
+      eligible: (m: { providerID: string }) => boolean,
+    ): number => {
+      for (let i = 0; i < chain.length; i++) {
+        if (models.some((m) => m.providerID === chain[i] && eligible(m)))
+          return i
+      }
+      return -1
+    }
+
     const pick = async (
       currentRef: string,
       category: string | undefined,
@@ -4214,9 +4273,62 @@ export default Plugin.define({
       // - Always with crossProvider (so that even if the whitelist's free models are all down,
       //   we can seamlessly fall back to paid models within budget)
       const emergency =
-        rescue && (providerCool(currentProvider) || cfg.crossProvider)
+        rescue && (providerCool(currentProvider) || cfg.crossProvider || cfg.providerChain.length > 0)
       let models = await candidates(emergency)
       if (models.length === 0) return undefined
+
+      // v1.1.1: provider-chain priority narrowing. Restrict candidates to the
+      // earliest chain entry that still has eligible, non-cooling candidates.
+      // On rescue, only models with observed records count (same rule as the
+      // tier narrowing below). When every chain entry is exhausted, keep the
+      // full candidate pool (emergency-expanded on rescue) as the last resort.
+      let chainTag: string | undefined
+      if (cfg.providerChain.length > 0 && !emergency) {
+        const observed = new Set<string>()
+        if (rescue) {
+          for (const m of models) {
+            const st = await loadStat(m.providerID, m.id)
+            if (st && st.success + st.failure > 0)
+              observed.add(refFor(m.providerID, m.id))
+          }
+        }
+        const chainIdx = firstHealthyChainIndex(
+          models,
+          cfg.providerChain,
+          (m) => {
+            const ref = refFor(m.providerID, m.id)
+            return !cool(ref) && (!rescue || observed.has(ref))
+          },
+        )
+        if (chainIdx >= 0) {
+          const pid = cfg.providerChain[chainIdx]
+          models = models.filter((m) => m.providerID === pid)
+          chainTag = `chain[${chainIdx}] ${pid}`
+          logRoute(
+            `CHAIN ${chainTag} (${models.length} models, load=${sessionID ? sessionLoad.get(sessionID) ?? "?" : "?"})`,
+          )
+        } else {
+          logRoute(
+            `CHAIN exhausted (${cfg.providerChain.join(" -> ")}) -> full pool`,
+          )
+        }
+      } else if (cfg.providerChain.length > 0 && emergency) {
+        // Rescue with emergency expansion: still prefer the chain order, but
+        // from the widened pool (a chain entry may be reachable via a paid
+        // model even when its free tier is down).
+        const chainIdx = firstHealthyChainIndex(models, cfg.providerChain, (m) => {
+          const ref = refFor(m.providerID, m.id)
+          if (cool(ref)) return false
+          // provider-scoped free-tier cooldown only blocks free models
+          return true
+        })
+        if (chainIdx >= 0) {
+          const pid = cfg.providerChain[chainIdx]
+          models = models.filter((m) => m.providerID === pid)
+          chainTag = `chain[${chainIdx}] ${pid}`
+          logRoute(`CHAIN ${chainTag} (emergency, ${models.length} models)`)
+        }
+      }
 
       // Tier selection (v0.8): when the load band is set, narrow candidates to
       // healthy (not cooling down) models within the tier. Within a tier, the existing statScore+exploration
@@ -4256,7 +4368,8 @@ export default Plugin.define({
           }
         }
       }
-      const tierPrefix = () => (tierTag ? `tier:${tierTag} ` : "")
+      const tierPrefix = () =>
+        `${chainTag ? `${chainTag} ` : ""}${tierTag ? `tier:${tierTag} ` : ""}`
 
       const maxCost =
         Math.max(...models.map((m) => routingCostOf(m))) || 1
@@ -4439,8 +4552,16 @@ export default Plugin.define({
       })
       if (!kinds.includes(event.kind)) return
       // Single provider: do not touch providers other than the target.
-      // crossProvider: requests of every provider are subject to re-routing.
-      if (!cfg.crossProvider && event.model.providerID !== cfg.providerID)
+      // v1.1.1: a set provider chain is in scope like crossProvider (its
+      // providers are valid routing targets). crossProvider: every provider.
+      const chainScope =
+        cfg.providerChain.length > 0 &&
+        cfg.providerChain.includes(event.model.providerID)
+      if (
+        !cfg.crossProvider &&
+        !chainScope &&
+        event.model.providerID !== cfg.providerID
+      )
         return
       const currentRef = refFor(event.model.providerID, event.model.id)
       // v1.0: OFF stops every model switch, rescue included. While disabled this
@@ -5067,6 +5188,13 @@ export default Plugin.define({
             "(mode: crossProvider / all providers mixed)",
           ),
         )
+      else if (cfg.providerChain.length > 0)
+        lines.push(
+          tr(
+            `(モード: プロバイダーチェーン ${cfg.providerChain.join(" -> ")} / 先頭を優先、尽きたら次へ)`,
+            `(mode: provider chain ${cfg.providerChain.join(" -> ")} / prefer the first, fall through on exhaustion)`,
+          ),
+        )
       else
         lines.push(
           tr(
@@ -5599,6 +5727,9 @@ export default Plugin.define({
         if (update.providerID !== cfg.providerID && !("models" in update))
           cfg.models = []
         cfg.providerID = update.providerID
+        // v1.1.1: /fusion-provider returns to single-provider mode — a chain
+        // pointing at the old primary would silently override the new one.
+        if (!("providerChain" in update)) cfg.providerChain = []
       }
       if (typeof update.crossProvider === "boolean") {
         // Switching crossProvider changes the whitelist format (model IDs vs provider/model-ids), so clear by default.
@@ -5606,6 +5737,18 @@ export default Plugin.define({
         if (update.crossProvider !== cfg.crossProvider && !("models" in update))
           cfg.models = []
         cfg.crossProvider = update.crossProvider
+      }
+      // v1.1.1: provider chain update. Empty array clears the chain (back to
+      // single-provider routing). A non-empty chain mirrors chain[0] into
+      // providerID and clears crossProvider (mutually exclusive modes).
+      if (Array.isArray(update.providerChain)) {
+        const chain = sanitizeProviderChain(update.providerChain)
+        cfg.providerChain = chain
+        if (chain.length > 0) {
+          if (update.providerID !== cfg.providerID && !("providerID" in update))
+            cfg.providerID = chain[0]
+          cfg.crossProvider = false
+        }
       }
       if (typeof update.exploreRate === "number") cfg.exploreRate = clamp(update.exploreRate, 0, 1)
       if (typeof update.learningRate === "number") cfg.learningRate = clamp(update.learningRate, 0, 1)

@@ -7,7 +7,7 @@
 // /fusion-stats      Show learning statistics
 // /fusion-toggle     Toggle routing ON/OFF
 // /fusion-config     Show the current configuration
-// /fusion-provider   Change the routing target provider
+// /fusion-provider   Change the routing target provider; multiple comma-separated entries form a priority chain (e.g. opencode-go, opencode, openrouter)
 // /fusion-whitelist  Edit the whitelist of routing candidate models
 // /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
 //                    (/fusion-weights works as an alias; includes cost caps and the former /fusion-audit)
@@ -249,6 +249,8 @@ type FusionConfig = {
   enabled?: boolean
   providerID?: string
   crossProvider?: boolean
+  // v1.1.1: priority-ordered provider fallback chain (empty = single-provider mode)
+  providerChain?: string[]
   exploreRate?: number
   learningRate?: number
   minObservations?: number
@@ -296,7 +298,7 @@ type FusionConfig = {
 const formatConfig = (c: FusionConfig, en = false): string => {
   const T = (ja: string, eng: string) => (en ? eng : ja)
   const lines = [
-    `provider      : ${c.providerID ?? "-"}${c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : ""}`,
+    `provider      : ${c.providerID ?? "-"}${c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : (c.providerChain ?? []).length > 0 ? T(` (chain: ${(c.providerChain ?? []).join(" -> ")})`, ` (chain: ${(c.providerChain ?? []).join(" -> ")})`) : ""}`,
     `routing       : ${c.enabled ? "ON" : "OFF"}`,
     `lang          : ${c.lang ?? "-"}`,
     `exploreRate   : ${c.exploreRate ?? "-"} (learning ${c.learningRate ?? "-"} / minObs ${c.minObservations ?? "-"})`,
@@ -1416,32 +1418,55 @@ export default Plugin.define({
         },
         {
           id: "fusion.provider",
-          title: tr("adaptive-fusion: ルーティング対象プロバイダーを変更", "adaptive-fusion: change the routing target provider"),
+          title: tr("adaptive-fusion: ルーティング対象プロバイダーを変更(優先順付きチェーン可)", "adaptive-fusion: change the routing target provider (priority chain supported)"),
           slash: { name: "fusion-provider" },
           run: async () => {
             try {
               const current = await fusion.config({}, { location: location() })
+              const chain = current.config.providerChain ?? []
               const input = await context.ui.dialog.prompt({
                 title: "adaptive-fusion provider",
-                placeholder: tr("provider-id (例: openrouter / opencode)", "provider-id (e.g. openrouter / opencode)"),
-                ...(current.config.providerID
-                  ? { default: current.config.providerID }
-                  : {}),
+                placeholder: tr(
+                  "provider-id、または優先順にカンマ区切り (例: opencode-go, opencode, openrouter)。先頭を優先し、尽きたら次へフォールバック",
+                  "provider-id, or comma-separated priority (e.g. opencode-go, opencode, openrouter). Prefer the first; fall through on exhaustion",
+                ),
+                default: chain.length > 0 ? chain.join(", ") : (current.config.providerID ?? ""),
               })
               if (input === undefined) return
-              const providerID = input.trim()
-              if (!providerID) return
-              if (providerID === current.config.providerID) return
-              // Changing the provider also resets the whitelist
-              const result = await fusion.config(
-                { update: { providerID, models: [] } },
-                { location: location() },
-              )
+              const providers = input
+                .split(/[,、]/)
+                .map((s) => s.trim())
+                .filter((s) => s.length > 0)
+                .filter((s, i, a) => a.indexOf(s) === i)
+                .slice(0, 8)
+              if (providers.length === 0) return
+              // Changing the provider (or chain) also resets the whitelist
+              // (model ids depend on the provider) — same rule as before.
+              const result =
+                providers.length === 1
+                  ? await fusion.config(
+                      // Single entry = plain single-provider mode (chain cleared)
+                      { update: { providerID: providers[0], models: [] } },
+                      { location: location() },
+                    )
+                  : await fusion.config(
+                      // Multiple entries = provider-chain mode; the server
+                      // mirrors chain[0] into providerID and turns crossProvider off.
+                      { update: { providerChain: providers, models: [] } },
+                      { location: location() },
+                    )
+              const c = result.config
               context.ui.toast.show({
-                message: `provider: ${result.config.providerID}`,
+                message:
+                  (c.providerChain ?? []).length > 1
+                    ? tr(
+                        `provider chain: ${(c.providerChain ?? []).join(" -> ")}(先頭を優先、尽きたら次へ)`,
+                        `provider chain: ${(c.providerChain ?? []).join(" -> ")} (prefer the first, fall through on exhaustion)`,
+                      )
+                    : `provider: ${c.providerID}`,
                 variant: "success",
               })
-              showLongText("adaptive-fusion config", formatConfig(result.config, lang() === "en"))
+              showLongText("adaptive-fusion config", formatConfig(c, lang() === "en"))
             } catch (error) {
               context.ui.toast.show({
                 message: `fusion-provider: ${errorText(error)}`,

@@ -72,6 +72,8 @@ export const AdaptiveFusion = Rpc.define({
               enabled: { type: "boolean" },
               providerID: { type: "string" },
               crossProvider: { type: "boolean" },
+              // v1.1.1: priority-ordered provider fallback chain (empty = single-provider mode)
+              providerChain: { type: "array", items: { type: "string" } },
               exploreRate: { type: "number" },
               learningRate: { type: "number" },
               minObservations: { type: "number" },
@@ -140,6 +142,8 @@ export const AdaptiveFusion = Rpc.define({
               enabled: { type: "boolean" },
               providerID: { type: "string" },
               crossProvider: { type: "boolean" },
+              // v1.1.1: priority-ordered provider fallback chain (empty = single-provider mode)
+              providerChain: { type: "array", items: { type: "string" } },
               exploreRate: { type: "number" },
               learningRate: { type: "number" },
               minObservations: { type: "number" },
@@ -200,6 +204,7 @@ export const AdaptiveFusion = Rpc.define({
               "enabled",
               "providerID",
               "crossProvider",
+              "providerChain",
               "exploreRate",
               "learningRate",
               "minObservations",

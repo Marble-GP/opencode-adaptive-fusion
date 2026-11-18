@@ -557,6 +557,25 @@ const noBody = groupReviewTurns(
 check("turn with no body still targetable", noBody.length, 1);
 check("no-body turn targets last assistant", noBody[0].assistant.id, "a1");
 
+// --- Provider chain priority (mirror of firstHealthyChainIndex, v1.1.1) ---
+// Candidates come from the FIRST chain entry that still has eligible
+// candidates; -1 when every entry is exhausted (caller keeps the full pool).
+const firstHealthyChainIndex = (models, chain, eligible) => {
+  for (let i = 0; i < chain.length; i++) {
+    if (models.some((m) => m.providerID === chain[i] && eligible(m))) return i;
+  }
+  return -1;
+};
+const P = (providerID) => ({ providerID });
+const okM = () => true;
+check("chain: first healthy entry wins", firstHealthyChainIndex([P("opencode-go"), P("opencode")], ["opencode-go", "opencode", "openrouter"], okM), 0);
+check("chain: exhausted primary falls to next", firstHealthyChainIndex([P("opencode"), P("openrouter")], ["opencode-go", "opencode", "openrouter"], okM), 1);
+check("chain: last entry works", firstHealthyChainIndex([P("openrouter")], ["opencode-go", "opencode", "openrouter"], okM), 2);
+check("chain: eligibility filter respected", firstHealthyChainIndex([P("opencode-go"), P("opencode")], ["opencode-go", "opencode"], (m) => m.providerID !== "opencode-go"), 1);
+check("chain: all exhausted -> -1", firstHealthyChainIndex([P("anthropic")], ["opencode-go", "opencode"], okM), -1);
+check("chain: empty chain -> -1", firstHealthyChainIndex([P("opencode-go")], [], okM), -1);
+check("chain: out-of-chain candidates ignored", firstHealthyChainIndex([P("anthropic"), P("opencode")], ["opencode-go", "opencode"], okM), 1);
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);

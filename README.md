@@ -249,7 +249,7 @@ defaults only.
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
-| `/fusion-provider` | Changes the routing target provider (`provider-id`, e.g. `opencode` / `openrouter`). | `providerID`; the whitelist is reset with it, because model ids depend on the provider. |
+| `/fusion-provider` | Changes the routing target provider. A single entry (`opencode-go`) selects plain single-provider routing; **multiple comma-separated entries** (`opencode-go, opencode, openrouter`) form a **priority provider chain** — candidates always come from the first chain entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window). | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off); the whitelist is reset with it, because model ids depend on the provider. |
 | `/fusion-whitelist` | Edits the candidate whitelist (comma-separated). With `crossProvider: true` use full `provider/model-id` refs, otherwise bare model ids. | `models` — empty means all eligible candidates, subject to the cost caps. |
 
 ### Score tuning
@@ -301,6 +301,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | Option | Default | Description |
 | --- | --- | --- |
 | `providerID` | `"opencode"` | Routing target provider. Use `"openrouter"` for OpenRouter-only setups. Changeable at runtime. |
+| `providerChain` | `[]` | Priority-ordered provider fallback chain (e.g. `["opencode-go","opencode","openrouter"]`). Empty = single-provider routing via `providerID`. Candidates come from the first entry with healthy models; exhausted entries (quota / account-wide free-tier cooldown) fall through to the next. Set with `/fusion-provider` (comma-separated input). |
 | `crossProvider` | `false` | Mix all connected providers when routing. Whitelist then uses full `provider/model-id` references. |
 | `enabled` | `false` | Initial routing state (toggle at runtime). |
 | `exploreRate` | `0.05` | ε-greedy exploration rate in steady state. |
