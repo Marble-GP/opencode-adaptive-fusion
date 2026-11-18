@@ -99,12 +99,12 @@ export const AdaptiveFusion = Rpc.define({
               topologyPriorStrength: { type: "number" },
               // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
               // failures before the session is moved to a healthy model.
-              // v1.1: rescue (after-fail) switch: allow up to N consecutive transient
-              // failures before the session is moved to a healthy model.
               rescueAttemptsBeforeSwitch: { type: "number" },
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               // v1.1: reasoning-effort (variant) selection
+              // Note: auto (hint-driven) still records the dispatched variant's
+              // outcome through http.request, so this table reflects reality.
               variantMode: { type: "string", enum: ["off", "auto", "fixed"] },
               // v1.1: variant forced in variantMode=fixed (null = unset)
               variantFixed: { type: ["string", "null"] },
@@ -171,6 +171,8 @@ export const AdaptiveFusion = Rpc.define({
               chainMode: { type: "string", enum: ["off", "active"] },
               tierMode: { type: "string", enum: ["off", "manual", "auto"] },
               // v1.1: reasoning-effort (variant) selection
+              // Note: auto (hint-driven) still records the dispatched variant's
+              // outcome through http.request, so this table reflects reality.
               variantMode: { type: "string", enum: ["off", "auto", "fixed"] },
               // v1.1: variant forced in variantMode=fixed (null = unset)
               variantFixed: { type: ["string", "null"] },

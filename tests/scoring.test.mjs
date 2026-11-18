@@ -163,9 +163,11 @@ const normalizeTopologyWeights = (weights) => {
   for (const [k, v] of Object.entries(weights)) out[k] = v / total;
   return out;
 };
+const TOPOLOGY_CATALOG = { single: true, router: true, "sequential-chain": true };
 const jevTopologyDistribution = (probabilities, choice, allowed) => {
   const filtered = {};
   for (const t of allowed) {
+    if (!(t in TOPOLOGY_CATALOG)) continue;
     const v = probabilities?.[t];
     if (typeof v === "number" && Number.isFinite(v) && v > 0) filtered[t] = v;
   }
@@ -215,8 +217,9 @@ check(
 const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const topologyReward = (stat, priorMean, strength = 4, wAuto = 0.25, wCP = 0.25) => {
   const pm = clampN(priorMean, 0, 1);
-  const a0 = 1 + strength * pm;
-  const b0 = 1 + strength * (1 - pm);
+  const strengthClamped = clampN(Math.floor(strength ?? 4), 1, 20);
+  const a0 = 1 + strengthClamped * pm;
+  const b0 = 1 + strengthClamped * (1 - pm);
   const auto =
     stat && stat.qualityCount > 0
       ? (stat.sumQuality / 5 + a0) / (stat.qualityCount + a0 + b0)
@@ -297,11 +300,13 @@ check("agentic null: review = intelligence", mapped["openrouter/acme/no-agentic"
 check("out-of-range clipped", buildBenchmarkModels([{ id: "x/clip", ...aaOf(150, -20, 50) }])["openrouter/x/clip"].overall, 1);
 
 // --- Attempt-aware rescue counter (mirror of noteAttemptFailure / attemptGateOpen) ---
-// Same failed attempt observed via http.response AND session.step.failed within
-// ATTEMPT_DEDUPE_MS counts once; genuine consecutive failures accumulate; the
-// window resets a stale counter.
+// The counter does NOT time-dedupe genuine retries (A11 regression: a 15 s
+// window suppressed fast retries). Cross-path (HTTP + event) dedupe is done
+// by the caller's seenViaHttp peek; the counter only collapses the same
+// attempt's double sighting within ATTEMPT_RACE_MS, resets after the window,
+// and is reset on success (consecutive-failure semantics).
 const ATTEMPT_WINDOW_MS = 10 * 60_000;
-const ATTEMPT_DEDUPE_MS = 15_000;
+const ATTEMPT_RACE_MS = 2_000;
 const attemptFailures = new Map();
 const attemptKey = (sid, ref) => `${sid}\n${ref}`;
 const clock = { now: 1_000_000_000 };
@@ -313,7 +318,7 @@ const peekAttemptFailures = (sid, ref, now = clock.now) => {
 const noteAttemptFailure = (sid, ref, now = clock.now) => {
   const key = attemptKey(sid, ref);
   const entry = attemptFailures.get(key);
-  if (entry && now - entry.at <= ATTEMPT_DEDUPE_MS) return entry.count;
+  if (entry && now - entry.at <= ATTEMPT_RACE_MS) return entry.count;
   if (entry && now - entry.at > ATTEMPT_WINDOW_MS) {
     attemptFailures.set(key, { count: 1, at: now });
     return 1;
@@ -322,22 +327,35 @@ const noteAttemptFailure = (sid, ref, now = clock.now) => {
   attemptFailures.set(key, { count, at: now });
   return count;
 };
-// one failure, seen through both channels within the dedupe window
+// attemptLimit clamps 1..10 with default 3 (mirror of index.ts attemptLimit)
+const attemptLimitOf = (configured) =>
+  Math.max(1, Math.min(10, Math.floor(configured ?? 3)));
+// attemptGateOpen mirror: counts, then gates on count < limit
+const attemptGateOpen = (sid, ref, configured, now = clock.now) => {
+  const count = noteAttemptFailure(sid, ref, now);
+  return count >= attemptLimitOf(configured);
+};
+// one failure, seen through both channels within the race window: counts once
 check("attempt 1 via HTTP", noteAttemptFailure("s1", "p/m", clock.now), 1);
-check("same attempt via event deduped", noteAttemptFailure("s1", "p/m", clock.now + 2_000), 1);
-check("attempt 2 counted", noteAttemptFailure("s1", "p/m", clock.now + 20_000), 2);
-check("event dedup of attempt 2", noteAttemptFailure("s1", "p/m", clock.now + 22_000), 2);
-// three distinct failures reach a limit of 3
-check("attempt 3 counted", noteAttemptFailure("s1", "p/m", clock.now + 40_000), 3);
-check("gate open at 3/3", peekAttemptFailures("s1", "p/m") >= 3, true);
-// success resets the budget (markRescueSwitch)
+check("same attempt second sighting deduped", noteAttemptFailure("s1", "p/m", clock.now + 500), 1);
+// A11 regression: failures at t=0/5s/10s are 3 distinct retries and must all count
+check("attempt 2 counted (5s later)", noteAttemptFailure("s1", "p/m", clock.now + 5_000), 2);
+check("attempt 2 second sighting deduped", noteAttemptFailure("s1", "p/m", clock.now + 5_500), 2);
+check("attempt 3 counted (10s later)", noteAttemptFailure("s1", "p/m", clock.now + 10_000), 3);
+check("gate open at 3/3 (default limit)", peekAttemptFailures("s1", "p/m", clock.now + 10_000) >= attemptLimitOf(undefined), true);
+// gate stays closed below the (configurable) limit
+check("gate closed at 1/2", attemptGateOpen("s2", "p/m", 2, clock.now), false);
+check("gate open at 2/2", attemptGateOpen("s2", "p/m", 2, clock.now + 5_000), true);
+check("limit clamped to >=1", attemptLimitOf(0), 1);
+check("limit clamped to <=10", attemptLimitOf(99), 10);
+// success resets the budget (A1-4: consecutive-failure semantics)
 attemptFailures.delete(attemptKey("s1", "p/m"));
 check("reset clears budget", peekAttemptFailures("s1", "p/m"), 0);
 // window expiry restarts counting
-check("attempt after first failure", noteAttemptFailure("s2", "p/m", clock.now), 1);
+check("attempt after first failure", noteAttemptFailure("s3", "p/m", clock.now), 1);
 check(
   "window expiry restarts counting",
-  noteAttemptFailure("s2", "p/m", clock.now + ATTEMPT_WINDOW_MS + 1),
+  noteAttemptFailure("s3", "p/m", clock.now + ATTEMPT_WINDOW_MS + 1),
   1,
 );
 
@@ -360,6 +378,15 @@ const VARIANT_EFFORT_RANK = {
 };
 const variantEffortRank = (id) => VARIANT_EFFORT_RANK[id.toLowerCase()] ?? 2;
 const variantBandLevel = (load) => 2 - ["heavy", "middle", "light"].indexOf(load);
+// Production rounds the raw hint at the call site:
+// variantLevelForLevel(clamp(Math.round(bandLevel), 0, 2), cls)
+const variantLevelForLevel = (band, cls) => {
+  const b = Math.min(2, Math.max(0, Math.round(band)));
+  if (!cls) return b;
+  const delta = b - variantBandLevel(cls);
+  if (delta === 0) return undefined;
+  return Math.max(0, Math.min(2, 1 + delta));
+};
 const pickVariantIndex = (variants, level) => {
   if (!Array.isArray(variants) || variants.length < 2) return -1;
   const ranked = variants
@@ -387,6 +414,9 @@ check("middle on light -> compensate up", variantLevelFor("middle", "light"), 2)
 check("light on middle -> lowest", variantLevelFor("light", "middle"), 0);
 check("unknown class -> band itself", variantLevelFor("heavy", undefined), 2);
 check("unknown class light -> 0", variantLevelFor("light", undefined), 0);
+check("fractional hint rounds up (2.4->2)", variantLevelForLevel(2.4, undefined), 2);
+check("fractional hint rounds (0.4->0)", variantLevelForLevel(0.4, undefined), 0);
+check("fractional hint rounds (1.6->2)", variantLevelForLevel(1.6, undefined), 2);
 // positional pick over the model's own list
 check("no variants -> no pick", pickOf(["high"], 2), undefined);
 check("level 0 picks lowest effort", pickOf(["low", "medium", "high"], 0), "low");
@@ -424,8 +454,8 @@ const variantBanditPos = (stats, computedPos, len) => {
 };
 const S = (ok, count) => ({ ok, count });
 check("bandit: all unobserved keeps computed", variantBanditPos([undefined, undefined, undefined], 1, 3), 1);
-check("bandit: bad pick escapes to unobserved left", variantBanditPos([undefined, S(0, 3), undefined], 1, 3), 0);
-check("bandit: bad pick escapes left", variantBanditPos([undefined, S(0, 3), undefined], 1, 3), 0);
+check("bandit: bad pick escapes to unobserved lower neighbor", variantBanditPos([undefined, S(0, 3), undefined], 1, 3), 0);
+check("bandit: unobserved tie bias is neutral (escape picks one side)", variantBanditPos([undefined, S(1, 3), undefined], 1, 3), 0);
 check("bandit: neutral pick not stolen by unobserved", variantBanditPos([undefined, undefined, undefined], 1, 3), 1);
 check("bandit: single lucky sample does not churn", variantBanditPos([S(1, 1), undefined, undefined], 1, 3), 1);
 check("bandit: 2/2 evidence beats neutral", variantBanditPos([S(2, 2), undefined, undefined], 1, 3), 0);

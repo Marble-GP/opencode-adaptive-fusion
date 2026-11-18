@@ -526,6 +526,7 @@ export default Plugin.define({
         cfg.variantMode = s.variantMode
       if (typeof s.variantFixed === "string")
         cfg.variantFixed = s.variantFixed.length > 0 ? s.variantFixed : null
+      else if (s.variantFixed === null) cfg.variantFixed = null
       if (typeof s.variantExploreRate === "number")
         cfg.variantExploreRate = clamp(s.variantExploreRate, 0, 1)
       if (s.lang === "ja" || s.lang === "en") cfg.lang = s.lang
@@ -1048,16 +1049,25 @@ export default Plugin.define({
     // succeed — so they keep the v1.0 immediate rescue behavior.
     //
     // The same failed attempt is usually observed twice (http.response AND
-    // session.step.failed, within moments of each other). The counter
-    // therefore deduplicates observations closer together than
-    // ATTEMPT_DEDUPE_MS. This biases toward undercounting, i.e. fewer
-    // switches — never the switch storm this feature replaces.
+    // session.step.failed, within moments of each other). Cross-path dedupe
+    // is handled by seenViaHttp (the event path only peeks when HTTP already
+    // counted the attempt), so the counter itself must NOT time-dedupe: a
+    // 15 s window suppressed legitimate rapid retries — failures at t=0, 5 s,
+    // 10 s all counted as 1 and the gate never opened for fast retry loops.
+    // A short 2 s backstop remains only for the (theoretical) event-first
+    // race where step.failed arrives before http.response: the two sightings
+    // of one attempt are milliseconds apart, while distinct retries need a
+    // full new request round-trip.
     const ATTEMPT_WINDOW_MS = 10 * 60_000 // consecutive-failure window
-    const ATTEMPT_DEDUPE_MS = 15_000 // same attempt seen via HTTP + event
+    const ATTEMPT_RACE_MS = 2_000 // same-attempt two-sighting collapse
     const RESCUE_SUPPRESS_MS = 15_000 // never switch twice in one episode
     const attemptFailures = new Map<string, { count: number; at: number }>()
     const lastHttpFailure = new Map<string, { ref: string; at: number }>()
     const rescueSwitchedAt = new Map<string, number>()
+    // Sessions with an in-flight rescue switch (A1-9): the event loop and the
+    // http.response hook run concurrently, so both could pass the suppression
+    // check during an awaited pick/switch. The claim makes the check atomic.
+    const rescueInFlight = new Set<string>()
 
     const attemptKey = (sessionID: string, ref: string) =>
       `${sessionID}\n${ref}`
@@ -1070,34 +1080,52 @@ export default Plugin.define({
       return entry.count
     }
 
-    // Record one failed attempt (deduplicated). Returns the updated count.
+    // Record one failed attempt. Returns the updated count. The 2 s backstop
+    // collapses only the same attempt's near-simultaneous double sighting;
+    // genuine retries (>2 s apart) always count.
     const noteAttemptFailure = (sessionID: string, ref: string) => {
       const now = Date.now()
       const key = attemptKey(sessionID, ref)
       const entry = attemptFailures.get(key)
-      if (entry && now - entry.at <= ATTEMPT_DEDUPE_MS)
-        return entry.count // same attempt re-observed (HTTP + event)
+      if (entry && now - entry.at <= ATTEMPT_RACE_MS)
+        return entry.count // same attempt's second sighting (race backstop)
       if (entry && now - entry.at > ATTEMPT_WINDOW_MS) {
         attemptFailures.set(key, { count: 1, at: now })
         return 1
       }
       const count = (entry?.count ?? 0) + 1
       attemptFailures.set(key, { count, at: now })
+      // A1-5: bound the map — evict stale entries, then oldest if still big
+      if (attemptFailures.size > 256) {
+        for (const [k, v] of attemptFailures)
+          if (now - v.at > ATTEMPT_WINDOW_MS) attemptFailures.delete(k)
+        while (attemptFailures.size > 256) {
+          const oldest = attemptFailures.keys().next().value
+          if (!oldest) break
+          attemptFailures.delete(oldest)
+        }
+      }
       return count
     }
 
-    const resetAttemptFailures = (sessionID: string, ref?: string) => {
-      if (ref) {
-        attemptFailures.delete(attemptKey(sessionID, ref))
-        return
-      }
-      const prefix = `${sessionID}\n`
-      for (const key of attemptFailures.keys())
-        if (key.startsWith(prefix)) attemptFailures.delete(key)
+    const resetAttemptFailures = (sessionID: string, ref: string) => {
+      attemptFailures.delete(attemptKey(sessionID, ref))
     }
 
     const rescueSuppressed = (sessionID: string) =>
       Date.now() - (rescueSwitchedAt.get(sessionID) ?? 0) < RESCUE_SUPPRESS_MS
+
+    // Atomically claim the right to switch this session. Returns false when
+    // another rescue is in flight or within the suppression window.
+    const tryClaimRescue = (sessionID: string) => {
+      if (rescueInFlight.has(sessionID) || rescueSuppressed(sessionID))
+        return false
+      rescueInFlight.add(sessionID)
+      return true
+    }
+    const releaseRescue = (sessionID: string) => {
+      rescueInFlight.delete(sessionID)
+    }
 
     // Called after a successful rescue switch: reset the failed model's budget
     // and suppress a second switch while the same failure episode is still
@@ -1196,6 +1224,12 @@ export default Plugin.define({
     }
 
     const abortEventWatch = new AbortController()
+    // A1-10: started at the end of setup (startEventWatch()), not here. The
+    // loop body closes over consts defined later in setup (pending,
+    // lastResolved, record, pick...); subscribing now would TDZ-throw if an
+    // event arrived mid-setup (e.g. a run already in flight during a hot
+    // reload), and the outer catch would silently kill the subscription.
+    const startEventWatch = () => {
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({
@@ -1261,11 +1295,17 @@ export default Plugin.define({
           const observed = lastHttpFailure.get(sid)
           const seenViaHttp =
             observed?.ref === ref &&
-            Date.now() - observed.at <= ATTEMPT_DEDUPE_MS
+            Date.now() - observed.at <= ATTEMPT_WINDOW_MS
           const definitive = cls === "quota" || match !== null
+          // The HTTP path counts its own attempt (attemptGateOpen); when this
+          // event is the second sighting of the same attempt, only peek — do
+          // not count again, or rapid retries double-count. When there was
+          // no HTTP flight (pre-HTTP failure), the event path counts itself.
           const allowSwitch = definitive
             ? !rescueSuppressed(sid)
-            : attemptGateOpen(sid, ref)
+            : seenViaHttp
+              ? peekAttemptFailures(sid, ref) >= attemptLimit()
+              : attemptGateOpen(sid, ref)
 
           if (!allowSwitch) {
             // Passive learning still runs; the model stays for the remaining
@@ -1284,7 +1324,10 @@ export default Plugin.define({
             continue
           }
 
-          markFailure(ref, cls)
+          // Only mark the cooldown if HTTP did not already do so for this
+          // attempt (A1-7): http.response marks quota definitively, and a
+          // second markFailure from this event would double the failure count.
+          if (!seenViaHttp) markFailure(ref, cls)
           // Quota failures are not penalized in quality (don't skew stats success rate)
           if (cls === "error" && !seenViaHttp) {
             const slash = ref.indexOf("/")
@@ -1300,44 +1343,49 @@ export default Plugin.define({
           // v1.0: cooldown marking + failure stats are passive learning and keep
           // running while OFF. The after-fail model switch is ACTIVE behavior —
           // skip it while OFF ("it switched models even though I turned it off").
-          if (cfg.enabled && !rescueSuppressed(sid)) {
-            const targetRef = ref
-            const currentCategory = sessionCategory.get(sid)
-            const choice = await pick(
-              targetRef,
-              currentCategory,
-              true,
-              sid,
-            )
-            if (choice) {
-              const nextRef = refFor(choice.providerID, choice.id)
-              if (nextRef === targetRef) {
-                logRoute(
-                  `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
-                )
-                continue
+          // tryClaimRescue serializes concurrent http.response/event switches.
+          if (cfg.enabled && tryClaimRescue(sid)) {
+            try {
+              const targetRef = ref
+              const currentCategory = sessionCategory.get(sid)
+              const choice = await pick(
+                targetRef,
+                currentCategory,
+                true,
+                sid,
+              )
+              if (choice) {
+                const nextRef = refFor(choice.providerID, choice.id)
+                if (nextRef === targetRef) {
+                  logRoute(
+                    `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
+                  )
+                } else {
+                  try {
+                    await ctx.session.switchModel({
+                      sessionID: sid,
+                      model: { providerID: choice.providerID, id: choice.id },
+                    })
+                    // Record the originally failed model as a restore candidate
+                    rescueAttempts.set(sid, {
+                      originalRef: targetRef,
+                      deadline: Date.now() + RESCUE_WINDOW_MS,
+                    })
+                    void persistRescue()
+                    markRescueSwitch(sid, targetRef)
+                    logRoute(
+                      `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
+                    )
+                  } catch (error) {
+                    logRoute(
+                      `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
+                    )
+                    console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
+                  }
+                }
               }
-              try {
-                await ctx.session.switchModel({
-                  sessionID: sid,
-                  model: { providerID: choice.providerID, id: choice.id },
-                })
-                // Record the originally failed model as a restore candidate
-                rescueAttempts.set(sid, {
-                  originalRef: targetRef,
-                  deadline: Date.now() + RESCUE_WINDOW_MS,
-                })
-                void persistRescue()
-                markRescueSwitch(sid, targetRef)
-                logRoute(
-                  `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
-                )
-              } catch (error) {
-                logRoute(
-                  `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
-                )
-                console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
-              }
+            } finally {
+              releaseRescue(sid)
             }
           }
         }
@@ -1345,16 +1393,18 @@ export default Plugin.define({
         // Failure to subscribe to events is ignored (can happen on reload)
       }
     })()
+    }
+
+    // (The watch is intentionally started at the end of setup, below.)
 
     // ------------------------------------------------------------------
     // Merge attempt tracking (v1.1)
     // ------------------------------------------------------------------
-    // Record HTTP failures for deduplication against retry.scheduled
-    // events so that a single transient error only counts once.
+    // Record HTTP failures for dedupe: seenViaHttp in the event path uses
+    // this to avoid counting/record the same attempt twice. The timestamp is
+    // refreshed on every HTTP failure (A1-2) so it never goes stale.
     const recordHttpFailure = (sid: string, ref: string) => {
       if (!sid || !ref) return
-      const existing = lastHttpFailure.get(sid)
-      if (existing?.ref === ref) return
       lastHttpFailure.set(sid, { ref, at: Date.now() })
       if (lastHttpFailure.size > 256) {
         const now = Date.now()
@@ -1913,18 +1963,42 @@ export default Plugin.define({
           typeof bandLevel === "number" && Number.isFinite(bandLevel)
             ? variantLevelForLevel(clamp(Math.round(bandLevel), 0, 2), cls)
             : variantLevelFor(load ?? "middle", cls)
-        if (level === undefined)
+        if (level === undefined) {
+          // Matched pair (provider default). If the default keeps failing
+          // (>=2 observations, ok-rate below the neutral prior), the
+          // matched-pair judgment was likely wrong — the task is heavier than
+          // judged. Escape upward: fall through with level=2 (highest
+          // variant) instead of returning the failing default forever (B3).
+          const defaultStat = await loadVariantStat(
+            providerID,
+            modelID,
+            "default",
+          )
+          if (
+            defaultStat &&
+            defaultStat.count >= 2 &&
+            variantOkScore(defaultStat) < 0.5
+          ) {
+            const ranked = ids
+              .map((v, i) => ({ id: v, rank: variantEffortRank(v), i }))
+              .sort((a, b) => a.rank - b.rank)
+            return {
+              variant: ranked[ranked.length - 1].id,
+              note: `default failing ok=${(variantOkScore(defaultStat) * 100).toFixed(0)}% -> compensate up (matched ${cls})`,
+            }
+          }
           return { note: `matched ${cls} (provider default)` }
+        }
         // Ranked by effort; the computed pick is the level's position.
+        // pickVariantIndex (tested mirror) is the single source for the
+        // position; the bandit below works in ranked coordinates.
         const ranked = ids
           .map((v, i) => ({ id: v, rank: variantEffortRank(v), i }))
           .sort((a, b) => a.rank - b.rank)
-        const computedPos =
-          level >= 2
-            ? ranked.length - 1
-            : level === 1
-              ? Math.max(0, Math.ceil(ranked.length / 2) - 1)
-              : 0
+        const computedIdx = pickVariantIndex(ids, level)
+        if (computedIdx < 0) return { note: "no variants" }
+        const computedPos = ranked.findIndex((r) => r.i === computedIdx)
+        if (computedPos < 0) return { note: "no variants" }
         let pos = computedPos
         // v1.1: closed-loop learning (anti-ossification). The computed pick
         // does not just get "upgraded" when a neighbor is better — it
@@ -1936,7 +2010,13 @@ export default Plugin.define({
         // escapes through the data. Ties keep the computed pick (no churn).
         const base = await loadVariantStat(providerID, modelID, ranked[pos].id)
         let bestScore = variantOkScore(base)
-        for (const j of [computedPos - 1, computedPos + 1]) {
+        // Randomize evaluation order (B4): with two unobserved neighbors the
+        // escape victim must not deterministically be the cheaper one.
+        const neighbors =
+          Math.random() < 0.5
+            ? [computedPos - 1, computedPos + 1]
+            : [computedPos + 1, computedPos - 1]
+        for (const j of neighbors) {
           if (j < 0 || j >= ranked.length) continue
           const neighbor = await loadVariantStat(
             providerID,
@@ -3185,13 +3265,15 @@ export default Plugin.define({
     // instead, directly switch the session's own model to a healthy candidate.
     // This also activates the provider and avoids the case where a resolve swap
     // becomes ModelUnavailableError.
+    // Returns whether the session model was actually switched (for the
+    // caller's rescue bookkeeping: suppression of duplicate switches).
     const switchSessionIfCooling = async (
       sessionID: string,
       category?: string,
-    ) => {
+    ): Promise<boolean> => {
       // v1.0: OFF stops all behavior (double safety: every caller is gated,
       // this guard keeps future call sites safe too).
-      if (!cfg.enabled) return
+      if (!cfg.enabled) return false
       try {
         const session: any = await ctx.session.get({ sessionID })
         let model = session?.model
@@ -3224,7 +3306,7 @@ export default Plugin.define({
               rescueAttempts.delete(sessionID)
               rescueTombstones.set(sessionID, Date.now())
               void persistRescue()
-              return
+              return true
             } catch (error) {
               logRoute(`RESCUE restore failed ${sessionID}: ${error}`)
             }
@@ -3232,19 +3314,19 @@ export default Plugin.define({
         }
         if (!model?.providerID || !model?.id) {
           logRoute(`PRE skip (session model unreadable, no resolve hint)`)
-          return
+          return false
         }
         if (!cool(currentRef!)) {
           // Even if the current model is healthy, the rescue-restore pending entry
           // is kept until it expires (24h) (to detect recovery of the original model)
           logRoute(`PRE alive ${currentRef} (no rescue needed)`)
-          return
+          return false
         }
 
         const choice = await pick(currentRef!, category, true, sessionID)
         if (!choice) {
           logRoute(`KEEP pre-prompt ${currentRef} (no rescue candidate)`)
-          return
+          return false
         }
         const next = { providerID: choice.providerID, id: choice.id }
         rescueAttempts.set(sessionID, {
@@ -3256,9 +3338,11 @@ export default Plugin.define({
         logRoute(
           `SWITCH pre-prompt ${currentRef} -> ${next.providerID}/${next.id} (${choice.reason})`,
         )
+        return true
       } catch (error) {
         logRoute(`PRE error: ${String(error).slice(0, 80)}`)
         console.log(`[adaptive-fusion] pre-prompt rescue failed: ${error}`)
+        return false
       }
     }
 
@@ -3753,6 +3837,10 @@ export default Plugin.define({
         if (clearCooldown(ref))
           logRoute(`RECOVER ok ${ref} (success observation)`)
         await record(observed.modelID, observed.providerID, category, true, ms)
+        // v1.1: a success breaks the consecutive-failure run (A1-4) — reset
+        // the attempt budget so non-consecutive failures cannot trip the gate.
+        resetAttemptFailures(event.sessionID, ref)
+        lastHttpFailure.delete(event.sessionID)
         // v1.1: per-(model,variant) outcome learning
         recordVariantOutcome(
           observed.providerID,
@@ -3790,8 +3878,17 @@ export default Plugin.define({
         markFailure(ref, "quota")
         // Immediately after a failure, fall back the session model to a healthy candidate (v0.8.1).
         // So OpenCode's retry / the next step / drain resume
-        // can use the saved healthy model.
-        void switchSessionIfCooling(event.sessionID, category)
+        // can use the saved healthy model. Awaited (not void) so a successful
+        // switch marks the rescue suppression (A1-8): the following
+        // session.step.failed must not switch again.
+        if (tryClaimRescue(event.sessionID)) {
+          try {
+            if (await switchSessionIfCooling(event.sessionID, category))
+              markRescueSwitch(event.sessionID, ref)
+          } finally {
+            releaseRescue(event.sessionID)
+          }
+        }
         return
       }
       await record(observed.modelID, observed.providerID, category, false, ms)
@@ -3810,38 +3907,42 @@ export default Plugin.define({
       const sid = event.sessionID
       if (!attemptGateOpen(sid, ref)) return
       markFailure(ref, cls)
-      if (cfg.enabled && !rescueSuppressed(sid)) {
-        const targetRef = ref
-        const currentCategory = sessionCategory.get(sid)
-        const choice = await pick(targetRef, currentCategory, true, sid)
-        if (choice) {
-          const nextRef = refFor(choice.providerID, choice.id)
-          if (nextRef === targetRef) {
-            logRoute(
-              `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
-            )
-          } else {
-            try {
-              await ctx.session.switchModel({
-                sessionID: sid,
-                model: { providerID: choice.providerID, id: choice.id },
-              })
-              rescueAttempts.set(sid, {
-                originalRef: targetRef,
-                deadline: Date.now() + RESCUE_WINDOW_MS,
-              })
-              void persistRescue()
-              markRescueSwitch(sid, targetRef)
+      if (cfg.enabled && tryClaimRescue(sid)) {
+        try {
+          const targetRef = ref
+          const currentCategory = sessionCategory.get(sid)
+          const choice = await pick(targetRef, currentCategory, true, sid)
+          if (choice) {
+            const nextRef = refFor(choice.providerID, choice.id)
+            if (nextRef === targetRef) {
               logRoute(
-                `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
+                `KEEP after-fail ${targetRef} (best candidate is the failed model)`,
               )
-            } catch (error) {
-              logRoute(
-                `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
-              )
-              console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
+            } else {
+              try {
+                await ctx.session.switchModel({
+                  sessionID: sid,
+                  model: { providerID: choice.providerID, id: choice.id },
+                })
+                rescueAttempts.set(sid, {
+                  originalRef: targetRef,
+                  deadline: Date.now() + RESCUE_WINDOW_MS,
+                })
+                void persistRescue()
+                markRescueSwitch(sid, targetRef)
+                logRoute(
+                  `SWITCH after-fail ${targetRef} -> ${choice.providerID}/${choice.id} (${choice.reason})`,
+                )
+              } catch (error) {
+                logRoute(
+                  `after-fail rescue failed ${sid}: ${String(error).slice(0, 80)}`,
+                )
+                console.log(`[adaptive-fusion] after-fail rescue failed: ${error}`)
+              }
             }
           }
+        } finally {
+          releaseRescue(sid)
         }
       }
       void switchSessionIfCooling(sid, category)
@@ -4210,7 +4311,10 @@ export default Plugin.define({
       // "auto" = Jev/LLM effort hint + weight-class compensation + exploration
       // + per-variant learning; "fixed" = cfg.variantFixed (when the model
       // actually has it). The session/agent's explicit variant always wins;
-      // rescue switches keep the target's default.
+      // rescue switches keep the target's default. Remember whether the
+      // variant was present BEFORE fusion sets one, so the routed-model
+      // handling below can tell user picks from fusion picks (B2).
+      const hadExplicitVariant = !!event.model.variant
       if (cfg.variantMode !== "off" && !rescue && !event.model.variant) {
         const picked = await variantForSession(
           event.model.providerID,
@@ -4248,20 +4352,48 @@ export default Plugin.define({
       // and cross-provider fallback happens via switchModel (the same path as manual model selection)
       // by updating the session model so the next dispatch uses it.
       if (choice.providerID === event.model.providerID) {
-        // Keep the variant decided above (or the routed model's own best fit
-        // when the routed model differs from the current one).
+        // B2: the variant decided earlier was for the ORIGINAL model (or the
+        // user's explicit pick). It must not be blindly carried to the routed
+        // model — a positional id like #high may not exist on it. Decide again
+        // for the routed model, keeping an explicit (user) variant only when
+        // the new model actually exposes it.
         let variant = event.model.variant
-        if (cfg.variantMode !== "off" && !variant && choice.id !== event.model.id) {
-          const picked = await variantForSession(
-            choice.providerID,
-            choice.id,
-            event.sessionID,
-          )
-          variant = picked?.variant
-          if (variant)
-            logRoute(
-              `VARIANT ${event.kind} ${choice.providerID}/${choice.id} -> #${variant} (${picked?.note}, routed model)`,
-            )
+        if (choice.id !== event.model.id) {
+          if (hadExplicitVariant && variant) {
+            let available = false
+            try {
+              const info: any = await (ctx.model as any).get(
+                choice.providerID,
+                choice.id,
+              )
+              const ids: string[] = ((info?.variants ?? []) as any[])
+                .map((v) => (typeof v === "string" ? v : v?.id))
+                .filter((v): v is string => typeof v === "string")
+              available = ids.includes(variant)
+            } catch {
+              available = false
+            }
+            if (!available) {
+              logRoute(
+                `VARIANT ${event.kind} ${choice.providerID}/${choice.id} #${variant} not available on routed model (dropped)`,
+              )
+              variant = undefined
+            }
+          } else {
+            variant = undefined
+            if (cfg.variantMode !== "off") {
+              const picked = await variantForSession(
+                choice.providerID,
+                choice.id,
+                event.sessionID,
+              )
+              variant = picked?.variant
+              if (variant)
+                logRoute(
+                  `VARIANT ${event.kind} ${choice.providerID}/${choice.id} -> #${variant} (${picked?.note}, routed model)`,
+                )
+            }
+          }
         }
         event.model = {
           providerID: choice.providerID,
@@ -4908,8 +5040,8 @@ export default Plugin.define({
       if (variantPage.entries.length > 0) {
         lines.push(
           tr(
-            `variant統計 (variantMode auto / 探索ε=${cfg.variantExploreRate})`,
-            `variant stats (variantMode auto / explore ε=${cfg.variantExploreRate})`,
+            `variant統計 (variantMode ${cfg.variantMode} / 探索ε=${cfg.variantExploreRate})`,
+            `variant stats (variantMode ${cfg.variantMode} / explore ε=${cfg.variantExploreRate})`,
           ),
         )
         const variantEntries = variantPage.entries
@@ -5199,6 +5331,8 @@ export default Plugin.define({
         AUTO_SKIP_PREFIX,
         TOPOLOGY_PREFIX,
         TASK_TOPOLOGY_PREFIX,
+        // v1.1: variant outcome learning (B6) — reset clears it too
+        VARIANT_PREFIX,
       ]) {
         const page = await ctx.storage.scan({ prefix, limit: 500 })
         for (const entry of page.entries) await ctx.storage.remove(entry.key)
@@ -5223,6 +5357,11 @@ export default Plugin.define({
       sessionLoad.clear()
       // variant自動選択のeffortヒント(v1.1)もクリア
       sessionEffort.clear()
+      // attempt-aware rescue の状態も全クリア (A1-5)
+      attemptFailures.clear()
+      lastHttpFailure.clear()
+      rescueSwitchedAt.clear()
+      rescueInFlight.clear()
       lastResolved.clear()
     }
 
@@ -5393,6 +5532,10 @@ export default Plugin.define({
       },
     })
 
+    // All definitions the event watch closes over are initialized now —
+    // safe to start consuming failure events (A1-10).
+    startEventWatch()
+
     return () => {
       abortEventWatch.abort()
       pending.clear()
@@ -5403,6 +5546,10 @@ export default Plugin.define({
       sessionTopology.clear()
       sessionLoad.clear()
       sessionEffort.clear()
+      attemptFailures.clear()
+      lastHttpFailure.clear()
+      rescueSwitchedAt.clear()
+      rescueInFlight.clear()
       chainPending.clear()
       chainPlans.clear()
     }

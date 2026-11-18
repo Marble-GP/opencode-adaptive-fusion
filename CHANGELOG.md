@@ -16,10 +16,10 @@
 - **`topologyExploreRate` (default 0.1)**: ε-greedy exploration — with this
   probability a non-greedy allowed topology is adopted, so non-single shapes
   can accumulate track records. Configurable via plugin options, the config
-  RPC, and `/fusion-weights` (`topoexplore`).
+  RPC, and `/fusion-params` (`topoexplore`).
 - **`topologyPriorStrength` (default 4, 1..20)**: pseudocount of the Bayesian
   prior on topology rewards. Configurable via plugin options, the config RPC,
-  and `/fusion-weights` (`topo-prior`).
+  and `/fusion-params` (`topo-prior`).
 - **Attempt-aware rescue (`rescueAttemptsBeforeSwitch`, default 3, 1..10)**:
   transient failures no longer trigger an immediate model switch. Consecutive
   failed attempts are counted per session/model (10 min window); rescue only
@@ -58,9 +58,9 @@
   switches keep the target model's default variant. Tune with
   `/fusion-params` (`varexplore`).
 - **`/fusion-params`**: `/fusion-weights` renamed — the editor now covers
-  non-weight knobs too (`topocalls`, `topo-prior`, `rescuattempts`,
-  `costin`/`costout`). The old `/fusion-weights` name keeps working as an
-  alias.
+  non-weight knobs too (`topocalls`, `topo-prior`, `topoexplore`,
+  `varexplore`, `rescuattempts`, `costin`/`costout`). The old
+  `/fusion-weights` name keeps working as an alias.
 - **Slash-command cleanup**: `/fusion-audit` and `/fusion-costcap` removed —
   both are covered by `/fusion-params` (`audit`, `costin`/`costout`). The
   command set is now 17 entries (16 dialogs: `params`/`weights` share one),

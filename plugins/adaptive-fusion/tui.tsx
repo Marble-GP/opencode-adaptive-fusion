@@ -16,6 +16,9 @@
 // /fusion-reset      Reset learning statistics, cooldowns, and human ratings
 // /fusion-reviewmodel Set the model responsible for internal (shadow) review
 // /fusion-chainmode  Toggle sequential-chain auxiliary execution (plan injection) off/active
+// /fusion-variantmode Configure reasoning-effort (thinking level) selection (auto / fixed / off)
+// /fusion-lang     Switch display language (ja / en)
+// /fusion-weights  Alias for /fusion-params
 // /fusion-tiermode   Toggle tier routing (Light/Middle/Heavy by load)
 // /fusion-tiers      Edit the model groups per tier (whitelist on steroids)
 // /fusion-jev-key     Register/clear the Jev (TypeSafe) API key (optional)
@@ -306,7 +309,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
-    `variant       : ${c.variantMode === "fixed" ? T(`fixed (#${c.variantFixed ?? "-"} / モデルに無い場合はスキップ)`, `fixed (#${c.variantFixed ?? "-"} / skipped when the model lacks it)`) : c.variantMode === "off" ? T("off (effort/thinking は変更しない)", "off (never touch effort/thinking)") : T(`auto (Jev/LLMヒント+重量クラス補正+探索ε ${c.variantExploreRate ?? "-"}+観測学習 / 明示指定は優先)`, `auto (Jev/LLM hint + weight-class compensation + explore ε ${c.variantExploreRate ?? "-"} + outcome learning; explicit choice wins)`)}`,
+    `variant       : ${c.variantMode === "fixed" ? T(`fixed (#${c.variantFixed ?? "-"} / モデルに無い場合はスキップ / ε ${c.variantExploreRate ?? "-"})`, `fixed (#${c.variantFixed ?? "-"} / skipped when the model lacks it / ε ${c.variantExploreRate ?? "-"})`) : c.variantMode === "off" ? T(`off (effort/thinking は変更しない / ε ${c.variantExploreRate ?? "-"})`, `off (never touch effort/thinking / ε ${c.variantExploreRate ?? "-"})`) : T(`auto (Jev/LLMヒント+重量クラス補正+探索ε ${c.variantExploreRate ?? "-"}+観測学習 / 明示指定は優先)`, `auto (Jev/LLM hint + weight-class compensation + explore ε ${c.variantExploreRate ?? "-"} + outcome learning; explicit choice wins)`)}`,
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,

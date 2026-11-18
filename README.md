@@ -256,7 +256,7 @@ defaults only.
 
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
-| `/fusion-params` | Batch-adjust the routing/topology coefficients and cost caps. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. `/fusion-weights` still works as an alias; the former `/fusion-audit` (`audit`) and `/fusion-costcap` (`costin` / `costout`) are covered here. | `costWeight`, `latencyWeight`, `maxInputCost`, `maxOutputCost`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost costin costout latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior rescuattempts`). |
+| `/fusion-params` | Batch-adjust the routing/topology coefficients and cost caps. Presets: `balanced`, `cost-first`, `quality-first`, `snappy`, `audit-on`. `custom` opens a searchable picker (type to filter, `ctrl+h` for help) that edits one field at a time, prefilled with the current value under range/integer validation. `/fusion-weights` still works as an alias; the former `/fusion-audit` (`audit`) and `/fusion-costcap` (`costin` / `costout`) are covered here. | `costWeight`, `latencyWeight`, `maxInputCost`, `maxOutputCost`, `exploreRate`, `learningRate`, `minObservations`, `benchmarkPriorWeight`, `autoReviewWeight`, `topologyWeightJev`, `topologyWeightHumanCP`, `topologyWeightAuto`, `maxTopologyCalls`, `topologyExploreRate`, `topologyPriorStrength`, `variantExploreRate`, `rescueAttemptsBeforeSwitch` (aliases: `cost costin costout latency explore learning minobs bench audit topojev topocp topoauto topocalls topoexplore topo-prior varexplore rescuattempts`). |
 | `/fusion-reviewmodel` | Sets the shadow/audit review model (`provider/model`; empty clears it). This model is a separate harness — it never scores its own output. | `reviewModel` — when empty it falls back like `classifierModel`. |
 
 ### Topology & tiers
@@ -326,6 +326,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `topologyWeightHumanCP` | `0.25` | Weight (w2) of human cost-performance ratings. |
 | `topologyWeightAuto` | `0.25` | Weight (w3) of automatic quality/ok-rate observations. |
 | `topologyExploreRate` | `0.1` | Probability of adopting a non-greedy allowed topology (ε-greedy) instead of the argmax at selection time. `0` = greedy only. |
+| `topologyPriorStrength` | `4` | Pseudocount of the Bayesian prior on topology rewards (1..20). Higher anchors more strongly to the load-band prior. |
 | `chainMode` | `off` | `active` injects a planner-generated plan (8 s timeout) as reference context for sequential-chain turns. |
 | `tierMode` | `off` | `off` / `manual` (user-defined tiers) / `auto` (split candidates by benchmark score). |
 | `tiers` | all empty | Per-tier groups `{ heavy: [], middle: [], light: [] }` of `provider/model` refs. |
@@ -652,8 +653,9 @@ automatically — but never silently:
   Subsequent attempts recover via rescue/cooldown learning.
 - The `model.resolve`, `http.*`, `context` and `prompt` hooks are experimental and may
   change in future OpenCode releases.
-- Success is judged from HTTP status; semantic quality comes from reviews, and shadow
-  auto-review is not yet reflected in routing scores.
+- Success is judged from HTTP status; semantic quality comes from reviews. Shadow
+  auto-review only feeds routing when `autoReviewWeight > 0` (sample/divergence
+  gates); the default `0` keeps it shadow display only.
 - Fan-out / hierarchical / collaboration / graph topologies are designed but not
   implemented; they are gated by `allowedTopologies`.
 - The first response of a brand-new session can fail once if the default model itself
