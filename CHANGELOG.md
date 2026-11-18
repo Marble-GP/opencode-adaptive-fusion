@@ -23,15 +23,18 @@
 
 ### Added
 - **Priority provider chain (`providerChain`, set with `/fusion-provider`)**:
-  `/fusion-provider` now accepts multiple comma-separated providers (e.g.
-  `opencode-go, opencode, openrouter`). Candidates always come from the first
-  chain entry that still has healthy (non-cooling) models; when that provider
-  is exhausted (quota / account-wide free-tier cooldown) the next entry takes
-  over, and sessions are restored to the original provider once it recovers
-  (rescue-restore, 24 h window). A single entry keeps the plain
-  single-provider behavior; setting a chain turns `crossProvider` off.
-  Falls back to the full (emergency-expanded on rescue) pool only when every
-  chain entry is exhausted, so replies never stop.
+  `/fusion-provider` is now a stack editor — `➕ add a provider` stacks a
+  typed id (Enter to add), and each entry can be swapped up/down (priority),
+  edited, or removed from its entry menu. One entry keeps the plain
+  single-provider behavior; two or more form a priority chain (e.g.
+  `opencode-go` -> `opencode` free tier -> `openrouter`): candidates always
+  come from the first entry that still has healthy (non-cooling) models;
+  when that provider is exhausted (quota / account-wide free-tier cooldown)
+  the next entry takes over, and sessions are restored to the original
+  provider once it recovers (rescue-restore, 24 h window). Setting a chain
+  turns `crossProvider` off. Falls back to the full (emergency-expanded on
+  rescue) pool only when every chain entry is exhausted, so replies never
+  stop.
 
 ## [1.1.0] - 2026-11-18
 

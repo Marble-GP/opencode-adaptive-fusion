@@ -7,7 +7,7 @@
 // /fusion-stats      Show learning statistics
 // /fusion-toggle     Toggle routing ON/OFF
 // /fusion-config     Show the current configuration
-// /fusion-provider   Change the routing target provider; multiple comma-separated entries form a priority chain (e.g. opencode-go, opencode, openrouter)
+// /fusion-provider   Change the routing target provider (stack UI: add entries, swap up/down; 2+ entries form a priority chain)
 // /fusion-whitelist  Edit the whitelist of routing candidate models
 // /fusion-params     Adjust routing/topology coefficients (presets + combobox editor with descriptions)
 //                    (/fusion-weights works as an alias; includes cost caps and the former /fusion-audit)
@@ -1423,38 +1423,243 @@ export default Plugin.define({
           run: async () => {
             try {
               const current = await fusion.config({}, { location: location() })
-              const chain = current.config.providerChain ?? []
-              const input = await context.ui.dialog.prompt({
-                title: "adaptive-fusion provider",
-                placeholder: tr(
-                  "provider-id、または優先順にカンマ区切り (例: opencode-go, opencode, openrouter)。先頭を優先し、尽きたら次へフォールバック",
-                  "provider-id, or comma-separated priority (e.g. opencode-go, opencode, openrouter). Prefer the first; fall through on exhaustion",
-                ),
-                default: chain.length > 0 ? chain.join(", ") : (current.config.providerID ?? ""),
-              })
-              if (input === undefined) return
-              const providers = input
-                .split(/[,、]/)
-                .map((s) => s.trim())
-                .filter((s) => s.length > 0)
-                .filter((s, i, a) => a.indexOf(s) === i)
-                .slice(0, 8)
-              if (providers.length === 0) return
-              // Changing the provider (or chain) also resets the whitelist
-              // (model ids depend on the provider) — same rule as before.
+              const originalChain = current.config.providerChain ?? []
+              const seed =
+                originalChain.length > 0
+                  ? [...originalChain]
+                  : current.config.providerID
+                    ? [current.config.providerID]
+                    : []
+              // Working stack: add (type + Enter) appends; entries can be
+              // swapped up/down, edited, or removed one by one.
+              let chain: string[] = [...seed]
+              // Reopen the list with this entry highlighted after an action
+              let focusIndex = -1
+
+              const addProvider = async (): Promise<void> => {
+                const input = await context.ui.dialog.prompt({
+                  title: tr(
+                    "adaptive-fusion: プロバイダーIDを入力(例: opencode-go)",
+                    "adaptive-fusion: enter a provider id (e.g. opencode-go)",
+                  ),
+                  placeholder: tr(
+                    "入力して Enter でチェーンの末尾にスタック",
+                    "type and press Enter to stack it at the end of the chain",
+                  ),
+                })
+                if (input === undefined) return
+                const id = input.trim()
+                if (id.length === 0) return
+                if (chain.includes(id)) {
+                  context.ui.toast.show({
+                    message: tr(
+                      `${id} は既にチェーンに含まれています`,
+                      `${id} is already in the chain`,
+                    ),
+                    variant: "error",
+                  })
+                  return
+                }
+                if (chain.length >= 8) {
+                  context.ui.toast.show({
+                    message: tr(
+                      "チェーンは最大8件です",
+                      "the chain holds at most 8 entries",
+                    ),
+                    variant: "error",
+                  })
+                  return
+                }
+                chain.push(id)
+                focusIndex = chain.length - 1
+              }
+
+              const editProvider = async (index: number): Promise<void> => {
+                const input = await context.ui.dialog.prompt({
+                  title: tr(
+                    "adaptive-fusion: プロバイダーIDを編集",
+                    "adaptive-fusion: edit the provider id",
+                  ),
+                  placeholder: tr(
+                    "新しい provider-id。空にすると削除",
+                    "new provider-id. Empty removes the entry",
+                  ),
+                  default: chain[index],
+                })
+                if (input === undefined) return
+                const id = input.trim()
+                if (id.length === 0) {
+                  chain.splice(index, 1)
+                  focusIndex = Math.min(index, chain.length - 1)
+                  return
+                }
+                if (chain.includes(id)) {
+                  context.ui.toast.show({
+                    message: tr(
+                      `${id} は既にチェーンに含まれています`,
+                      `${id} is already in the chain`,
+                    ),
+                    variant: "error",
+                  })
+                  return
+                }
+                chain[index] = id
+              }
+
+              for (;;) {
+                const picked = await context.ui.dialog.select({
+                  title: tr(
+                    "ルーティングプロバイダーチェーン(上ほど優先 / Esc で終了)",
+                    "Routing provider chain (higher = preferred; Esc to finish)",
+                  ),
+                  ...(focusIndex >= 0 && focusIndex < chain.length
+                    ? { current: `item:${focusIndex}` }
+                    : {}),
+                  options: [
+                    ...chain.map((p, i) => ({
+                      title: `${i + 1}. ${p}`,
+                      value: `item:${i}`,
+                      description:
+                        i === 0
+                          ? tr(
+                              "最優先(健全な限りここから選ばれる)",
+                              "highest priority (used while healthy)",
+                            )
+                          : tr(
+                              `${chain[i - 1]} が尽きたときのフォールバック`,
+                              `fallback when ${chain[i - 1]} is exhausted`,
+                            ),
+                    })),
+                    {
+                      title: tr("➕ プロバイダーを追加", "➕ add a provider"),
+                      value: "add",
+                      category: tr("操作", "actions"),
+                      description: tr(
+                        "入力して Enter で末尾にスタック",
+                        "type and press Enter to stack it at the end",
+                      ),
+                    },
+                    {
+                      title: tr("✔ 完了(保存して終了)", "✔ done (save and finish)"),
+                      value: "done",
+                      category: tr("操作", "actions"),
+                      description: tr(
+                        "チェーンを保存(Esc でも終了)",
+                        "save the chain (Esc also finishes)",
+                      ),
+                    },
+                  ],
+                })
+                if (!picked || picked === "done") break
+                if (picked === "add") {
+                  await addProvider()
+                  continue
+                }
+                // Entry menu: swap up/down, edit, remove
+                const m = /^item:(\d+)$/.exec(picked)
+                if (!m) continue
+                const index = Number(m[1])
+                if (index < 0 || index >= chain.length) continue
+                focusIndex = index
+                const action = await context.ui.dialog.select({
+                  title: `${index + 1}. ${chain[index]}`,
+                  current: "up",
+                  options: [
+                    {
+                      title: tr("↑ 一つ上へ(優先度を上げる)", "↑ move up (raise priority)"),
+                      value: "up",
+                      description:
+                        index === 0
+                          ? tr("既に最上位です", "already at the top")
+                          : tr(
+                              `${chain[index - 1]} と交換`,
+                              `swap with ${chain[index - 1]}`,
+                            ),
+                    },
+                    {
+                      title: tr("↓ 一つ下へ(優先度を下げる)", "↓ move down (lower priority)"),
+                      value: "down",
+                      description:
+                        index === chain.length - 1
+                          ? tr("既に最下位です", "already at the bottom")
+                          : tr(
+                              `${chain[index + 1]} と交換`,
+                              `swap with ${chain[index + 1]}`,
+                            ),
+                    },
+                    {
+                      title: tr("✏ プロバイダーIDを編集", "✏ edit the provider id"),
+                      value: "edit",
+                      description: tr(
+                        "空入力でこのエントリを削除",
+                        "empty input removes this entry",
+                      ),
+                    },
+                    {
+                      title: tr("✕ このエントリを削除", "✕ remove this entry"),
+                      value: "remove",
+                      description: tr(
+                        "チェーンから取り除く",
+                        "take it out of the chain",
+                      ),
+                    },
+                    {
+                      title: tr("← 戻る", "← back"),
+                      value: "back",
+                      category: tr("操作", "actions"),
+                      description: tr(
+                        "チェーン一覧に戻る",
+                        "back to the chain list",
+                      ),
+                    },
+                  ],
+                })
+                if (!action || action === "back") continue
+                if (action === "up") {
+                  if (index > 0) {
+                    ;[chain[index - 1], chain[index]] = [
+                      chain[index],
+                      chain[index - 1],
+                    ]
+                    focusIndex = index - 1
+                  }
+                } else if (action === "down") {
+                  if (index < chain.length - 1) {
+                    ;[chain[index + 1], chain[index]] = [
+                      chain[index],
+                      chain[index + 1],
+                    ]
+                    focusIndex = index + 1
+                  }
+                } else if (action === "edit") {
+                  await editProvider(index)
+                } else if (action === "remove") {
+                  chain.splice(index, 1)
+                  focusIndex = Math.min(index, chain.length - 1)
+                }
+              }
+
+              // Esc / done: persist only when the stack actually changed.
+              const unchanged =
+                JSON.stringify(chain) === JSON.stringify(seed)
+              if (unchanged) return
               const result =
-                providers.length === 1
+                chain.length >= 2
                   ? await fusion.config(
-                      // Single entry = plain single-provider mode (chain cleared)
-                      { update: { providerID: providers[0], models: [] } },
+                      { update: { providerChain: chain, models: [] } },
                       { location: location() },
                     )
-                  : await fusion.config(
-                      // Multiple entries = provider-chain mode; the server
-                      // mirrors chain[0] into providerID and turns crossProvider off.
-                      { update: { providerChain: providers, models: [] } },
-                      { location: location() },
-                    )
+                  : chain.length === 1
+                    ? await fusion.config(
+                        // Single entry left = plain single-provider mode
+                        { update: { providerID: chain[0], models: [] } },
+                        { location: location() },
+                      )
+                    : await fusion.config(
+                        // Empty stack = clear the chain (single provider stays)
+                        { update: { providerChain: [], models: [] } },
+                        { location: location() },
+                      )
               const c = result.config
               context.ui.toast.show({
                 message:
@@ -1463,7 +1668,10 @@ export default Plugin.define({
                         `provider chain: ${(c.providerChain ?? []).join(" -> ")}(先頭を優先、尽きたら次へ)`,
                         `provider chain: ${(c.providerChain ?? []).join(" -> ")} (prefer the first, fall through on exhaustion)`,
                       )
-                    : `provider: ${c.providerID}`,
+                    : tr(
+                        `provider: ${c.providerID}(単一プロバイダー)`,
+                        `provider: ${c.providerID} (single provider)`,
+                      ),
                 variant: "success",
               })
               showLongText("adaptive-fusion config", formatConfig(c, lang() === "en"))
