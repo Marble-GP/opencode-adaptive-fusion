@@ -272,7 +272,7 @@ defaults only.
 
 | Command | What it does | What you see / set |
 | --- | --- | --- |
-| `/fusion-review` | Asks for the target turn (`0` = latest, `1` = one turn back, … up to 50), then opens the review panel. | Response summary; shadow auto-review axes (instruction / accuracy / completeness / cost-efficiency) and the enumerated accomplishments; per-turn token, cost and throughput statistics. A 1–5 human rating feeds the learning score. Reviews and ratings are persisted (saved reviews survive `/fusion-reset`; ratings do not). |
+| `/fusion-review` | Asks for the target turn (`0` = latest, `1` = one turn back, … up to 50), then opens the review panel. A **turn** is one user prompt plus all the assistant messages that answer it (a tool-using response is one turn), and the review target is the turn's final response body. | Response summary; shadow auto-review axes (instruction / accuracy / completeness / cost-efficiency) and the enumerated accomplishments; per-turn token, cost and throughput statistics; **this turn's** topology and its stats (per-turn metadata, not the session's current values). A 1–5 human rating feeds the learning score — **one review per turn**: a turn that has already been rated shows its rating instead of the buttons, and re-rating is rejected server-side. Reviews and ratings are persisted (saved reviews survive `/fusion-reset`; ratings and the rated-turn markers do not — after a reset, turns can be rated once again). |
 
 ### Integration
 

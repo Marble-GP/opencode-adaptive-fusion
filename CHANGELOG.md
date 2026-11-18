@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] — v1.1.1 (bug fixes)
+
+### Fixed
+- **One review per turn (`/fusion-review`)**: a turn could be rated any number
+  of times — every button press recorded another sample. Ratings are now
+  recorded per target message (`fusion/review/<sessionID>.turns`), re-rating a
+  rated turn is rejected server-side, and the panel shows the recorded rating
+  instead of the buttons. `/fusion-reset` clears the markers, so turns become
+  rateable again after a stats reset.
+- **Review offset counts logical turns, not assistant messages**: a tool-using
+  response produces several assistant messages, so adjacent offsets landed on
+  different steps of the SAME turn and the panel looked stuck (same
+  instruction, same stats). Turns are now grouped by user prompt; the target
+  is the turn's final response body.
+- **Per-turn topology/category in the review panel**: the topology row and its
+  stats used the session's CURRENT topology for every offset (identical
+  across turns). Each turn's topology/category is now recorded with the turn
+  (`fusion/review/<sessionID>.turns`), shown for that turn, and topology
+  cost-performance ratings are recorded against the turn's own topology.
+  Turns recorded before this fix fall back to the session's current values.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

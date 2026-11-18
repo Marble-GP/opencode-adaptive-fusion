@@ -466,6 +466,8 @@ export default Plugin.define({
       feedbackCount: number
       // v0.9.0: turn statistics (input/output tokens, cost, measured speed)
       turn?: TurnStatsInfo
+      // v1.1.1: this turn's recorded human ratings (one review per turn)
+      rated?: { rating?: number; topologyRating?: number }
       topology?: string
       topologyRatingAverage?: number
       topologyRatingCount?: number
@@ -757,19 +759,19 @@ export default Plugin.define({
             <text fg={context.theme.text.base} onMouseDown={() => void generateSummary()}>
               {busy() ? tr("[サマリー生成中…]", "[generating summary…]") : tr("[サマリーを生成]", "[generate summary]")}
             </text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rate(1)}>[1]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rate(2)}>[2]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rate(3)}>[3]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rate(4)}>[4]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rate(5)}>[5]</text>
+            {info()?.rated?.rating !== undefined
+              ? <text fg={context.theme.textMuted?.base ?? context.theme.text.base}>{tr(`評価済み: ${info()!.rated!.rating}/5`, `rated: ${info()!.rated!.rating}/5`)}</text>
+              : [1, 2, 3, 4, 5].map((n) => (
+                <text key={n} fg={context.theme.text.base} onMouseDown={() => void rate(n)}>[{n}]</text>
+              ))}
           </box>
           <text fg={context.theme.text.base}>{tr("トポロジーコスパ評価(1〜5)", "Topology cost-performance rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
-            <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(1)}>[1]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(2)}>[2]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(3)}>[3]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(4)}>[4]</text>
-            <text fg={context.theme.text.base} onMouseDown={() => void rateTopology(5)}>[5]</text>
+            {info()?.rated?.topologyRating !== undefined
+              ? <text fg={context.theme.textMuted?.base ?? context.theme.text.base}>{tr(`評価済み: ${info()!.rated!.topologyRating}/5`, `rated: ${info()!.rated!.topologyRating}/5`)}</text>
+              : [1, 2, 3, 4, 5].map((n) => (
+                <text key={n} fg={context.theme.text.base} onMouseDown={() => void rateTopology(n)}>[{n}]</text>
+              ))}
           </box>
           <text fg={context.theme.text.base}>{message()}</text>
         </box>

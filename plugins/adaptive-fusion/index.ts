@@ -2083,9 +2083,13 @@ export default Plugin.define({
 
     const saveReviewAssignment = async (sessionID: string, category: string) => {
       try {
+        // Preserve the per-turn metadata/rated markers when overwriting the
+        // assignment (v1.1.1 review fix).
+        const prev = await loadReviewTurns(sessionID)
         await ctx.storage.set(`${REVIEW_PREFIX}${sessionID}`, {
           category,
           assignedAt: new Date().toISOString(),
+          ...(Object.keys(prev).length > 0 ? { turns: prev } : {}),
         })
       } catch {
         // Failure to persist review-assignment metadata does not block normal processing
@@ -2101,6 +2105,98 @@ export default Plugin.define({
         category: typeof s.category === "string" ? s.category : undefined,
         assignedAt: typeof s.assignedAt === "string" ? s.assignedAt : undefined,
       }
+    }
+
+    // ------------------------------------------------------------------
+    // Per-turn review metadata + rated markers (v1.1.1 review fix)
+    // ------------------------------------------------------------------
+    // One review per turn: each assistant turn's metadata (topology/category
+    // actually used) and its human ratings are recorded under
+    // fusion/review/<sessionID>.turns keyed by the target messageID. The
+    // rated markers stop the same turn from being rated twice, and the
+    // per-turn topology/category stop adjacent turns from showing the
+    // session-current stats ("stuck stats" across turns).
+    type ReviewTurnMeta = {
+      topology: string
+      category: string
+      at: number
+      rating?: number
+      topologyRating?: number
+    }
+    const loadReviewTurns = async (
+      sessionID: string,
+    ): Promise<Record<string, ReviewTurnMeta>> => {
+      try {
+        const saved = await ctx.storage.get(`${REVIEW_PREFIX}${sessionID}`)
+        if (!saved || typeof saved !== "object") return {}
+        const turns = (saved as Record<string, unknown>).turns
+        if (!turns || typeof turns !== "object") return {}
+        const out: Record<string, ReviewTurnMeta> = {}
+        for (const [id, v] of Object.entries(
+          turns as Record<string, unknown>,
+        )) {
+          if (!v || typeof v !== "object") continue
+          const t = v as Record<string, unknown>
+          if (typeof t.topology !== "string") continue
+          out[id] = {
+            topology: t.topology,
+            category: typeof t.category === "string" ? t.category : "",
+            at: typeof t.at === "number" ? t.at : 0,
+            ...(typeof t.rating === "number" ? { rating: t.rating } : {}),
+            ...(typeof t.topologyRating === "number"
+              ? { topologyRating: t.topologyRating }
+              : {}),
+          }
+        }
+        return out
+      } catch {
+        return {}
+      }
+    }
+    const saveReviewTurns = async (
+      sessionID: string,
+      turns: Record<string, ReviewTurnMeta>,
+    ) => {
+      try {
+        const saved = await ctx.storage.get(`${REVIEW_PREFIX}${sessionID}`)
+        const s =
+          saved && typeof saved === "object"
+            ? (saved as Record<string, unknown>)
+            : {}
+        // Bound the map: keep the latest 100 turn entries.
+        const entries = Object.entries(turns).sort((a, b) => b[1].at - a[1].at)
+        const bounded: Record<string, ReviewTurnMeta> = {}
+        for (const [id, meta] of entries.slice(0, 100)) bounded[id] = meta
+        await ctx.storage.set(`${REVIEW_PREFIX}${sessionID}`, {
+          ...s,
+          turns: bounded,
+        })
+      } catch {
+        // Failure to persist turn metadata does not block the review flow
+      }
+    }
+    const upsertReviewTurn = async (
+      sessionID: string,
+      messageID: string,
+      patch: Partial<ReviewTurnMeta> & { topology: string; category: string },
+    ) => {
+      if (!messageID) return
+      const turns = await loadReviewTurns(sessionID)
+      const existing = turns[messageID]
+      turns[messageID] = {
+        topology: patch.topology ?? existing?.topology ?? "single",
+        category: patch.category ?? existing?.category ?? "",
+        at: Date.now(),
+        ...(existing?.rating !== undefined ? { rating: existing.rating } : {}),
+        ...(patch.rating !== undefined ? { rating: patch.rating } : {}),
+        ...(existing?.topologyRating !== undefined
+          ? { topologyRating: existing.topologyRating }
+          : {}),
+        ...(patch.topologyRating !== undefined
+          ? { topologyRating: patch.topologyRating }
+          : {}),
+      }
+      await saveReviewTurns(sessionID, turns)
     }
 
     // ------------------------------------------------------------------
@@ -2218,10 +2314,14 @@ export default Plugin.define({
     const recordTopologyCostPerformance = async (
       sessionID: string,
       rating: number,
+      // v1.1.1: the TURN's topology (per-turn metadata). Falls back to the
+      // session's current topology (legacy behavior) when absent.
+      turnTopology?: string,
+      turnCategory?: string,
     ) => {
       try {
-        const topology = sessionTopology.get(sessionID) ?? "single"
-        const category = sessionCategory.get(sessionID)
+        const topology = turnTopology ?? sessionTopology.get(sessionID) ?? "single"
+        const category = turnCategory ?? sessionCategory.get(sessionID)
         const apply = (stat: TopologyStat) => {
           stat.sumCostPerformance += rating
           stat.costPerformanceCount += 1
@@ -2743,6 +2843,10 @@ export default Plugin.define({
       instructionPreview: string
       text: string
       preview: string
+      // v1.1.1: the topology actually used for THIS turn (per-turn metadata;
+      // falls back to the session's current topology for old turns recorded
+      // before per-turn tracking existed).
+      topology: string
       // v0.9.0: target turn (0 = latest, 1 = one before, ...). Earlier responses can also be reviewed.
       offset: number
       // v0.9.0: turn stats (tokens/cost/time are persisted on the message, so
@@ -2759,6 +2863,53 @@ export default Plugin.define({
         finish: string
         createdAt: number
       }
+    }
+
+    // v1.1.1 review fix: group the session context into logical TURNS. A turn
+    // = one user prompt + the assistant messages that answer it. A tool-using
+    // response produces several assistant messages (one per step), so the old
+    // message-indexed offset landed on different steps of the SAME turn —
+    // adjacent offsets showed the same instruction/category/topology stats
+    // ("stuck stats"). Turn targets are the turn's LAST assistant message
+    // with text (the completed response body).
+    const groupReviewTurns = (
+      context: any[],
+      messageText: (message: any) => string,
+      userTextOf: (message: any) => string,
+    ): { instruction: string; assistant: any }[] => {
+      const chronological = [...context].sort(
+        (a: any, b: any) =>
+          num(a?.time?.created, 0) - num(b?.time?.created, 0),
+      )
+      const turns: { instruction: string; assistants: any[] }[] = []
+      let current: { instruction: string; assistants: any[] } | undefined
+      for (const message of chronological) {
+        if (message?.type === "user") {
+          const text = userTextOf(message).trim()
+          if (text.length === 0) continue // attachments only, not a new turn
+          current = { instruction: text, assistants: [] }
+          turns.push(current)
+        } else if (message?.type === "assistant" && message?.model) {
+          if (!current) {
+            current = { instruction: "", assistants: [] }
+            turns.push(current)
+          }
+          current.assistants.push(message)
+        }
+      }
+      // Turn target: the last assistant message with a body; a turn without
+      // any body keeps its last assistant message (preview shows "(empty)").
+      return turns
+        .map((t) => ({
+          instruction: t.instruction,
+          assistant:
+            [...t.assistants]
+              .reverse()
+              .find((a) => messageText(a).length > 0) ??
+            t.assistants[t.assistants.length - 1],
+        }))
+        .filter((t) => t.assistant !== undefined)
+        .reverse() // newest turn first; offset 0 = latest turn
     }
 
     const getReviewTarget = async (
@@ -2781,18 +2932,7 @@ export default Plugin.define({
           .join("\n")
           .trim() ||
         (typeof message?.text === "string" ? message.text : "")
-      const assistants = context
-        .filter((message: any) => message?.type === "assistant" && message?.model)
-        .sort(
-          (a: any, b: any) =>
-            num(b?.time?.created, 0) - num(a?.time?.created, 0),
-        )
-      // v0.9.0: target the "response with a body" at position offset (0 = latest, 1 = one before, ...).
-      // Only offset=0 keeps the legacy behavior (also falls back to the latest body-less message).
-      const withText = assistants.filter((message) => messageText(message).length > 0)
-      const assistant = withText[offset] ?? (offset === 0 ? assistants[0] : undefined)
-      if (!assistant) return undefined
-      const userText = (message: any): string => {
+      const userTextOf = (message: any): string => {
         if (typeof message?.text === "string") return message.text
         if (typeof message?.payload?.text === "string") return message.payload.text
         return (message?.content ?? [])
@@ -2801,20 +2941,31 @@ export default Plugin.define({
           .join("\n")
           .trim()
       }
-      const users = context
-        .filter((message: any) => {
-          if (message?.type !== "user") return false
-          const created = num(message?.time?.created, 0)
-          const assistantCreated = num(assistant?.time?.created, Number.MAX_SAFE_INTEGER)
-          return created === 0 || created <= assistantCreated
-        })
-        .map((message) => ({ message, created: num(message?.time?.created, 0) }))
-        .sort((a, b) => b.created - a.created)
-      const instruction = users
-        .map(({ message }) => userText(message).trim())
-        .find((text) => text.length > 0) ?? ""
+      const turnList = groupReviewTurns(context, messageText, userTextOf)
+      const entry = turnList[offset]
+      const assistant = entry?.assistant
+      if (!assistant) return undefined
+      const instruction = entry.instruction ?? ""
       const text = messageText(assistant)
       const assignment = await loadReviewAssignment(sessionID)
+      const turnsMeta = await loadReviewTurns(sessionID)
+      const messageID = String(assistant.id ?? "")
+      const meta = turnsMeta[messageID]
+      // v1.1.1: per-turn topology/category. For the latest turn (offset 0) the
+      // session maps still hold this turn's values — record them so later
+      // offset views (and re-opens after restart) show the values this turn
+      // actually used instead of the session's current ones.
+      const sessionTopo = sessionTopology.get(sessionID) ?? "single"
+      const topology = meta?.topology ?? sessionTopo
+      const category =
+        meta?.category ?? assignment.category ?? sessionCategory.get(sessionID) ?? ""
+      if (offset === 0 && messageID && !meta) {
+        void upsertReviewTurn(sessionID, messageID, {
+          topology: sessionTopo,
+          category:
+            assignment.category ?? sessionCategory.get(sessionID) ?? "",
+        })
+      }
       // v0.9.0: turn stats. Only included when tokens/cost/time are recorded on the message
       // (omitted for error responses, etc.). tps = output tokens ÷
       // (completed - firstToken), the actual streamed duration.
@@ -2838,15 +2989,16 @@ export default Plugin.define({
       const hasTurnStats =
         tokens !== undefined || (assistant as any)?.cost !== undefined
       return {
-        messageID: String(assistant.id ?? ""),
+        messageID,
         providerID: String(assistant.model.providerID ?? ""),
         modelID: String(assistant.model.id ?? ""),
-        category: assignment.category ?? sessionCategory.get(sessionID) ?? "",
+        category,
         assignedAt: assignment.assignedAt ?? "",
         instruction,
         instructionPreview: instruction.slice(0, 160),
         text,
         preview: text.slice(0, 480),
+        topology,
         offset,
         ...(hasTurnStats
           ? {
@@ -4468,8 +4620,14 @@ export default Plugin.define({
     // Return the topology stats tied to the session as a display snapshot.
     // D-3: includes not only the cost-performance rating, but also observed records
     // (run count / ok rate / measured latency / quality).
-    const topologySnapshot = async (sessionID: string) => {
-      const topology = sessionTopology.get(sessionID) ?? "single"
+    // v1.1.1: accepts the TURN's topology (from per-turn metadata) so that
+    // reviewing an older turn shows that turn's topology stats instead of the
+    // session's current one. Falls back to the session map for old turns.
+    const topologySnapshot = async (
+      sessionID: string,
+      turnTopology?: string,
+    ) => {
+      const topology = turnTopology ?? sessionTopology.get(sessionID) ?? "single"
       const stat = await loadTopologyStat(TOPOLOGY_PREFIX + topology)
       const cpCount = stat?.costPerformanceCount ?? 0
       const qCount = stat?.qualityCount ?? 0
@@ -4515,6 +4673,22 @@ export default Plugin.define({
         | FeedbackStat
         | undefined
       const count = feedback?.count ?? 0
+      // v1.1.1: rated markers for this turn (one review per turn)
+      const turnsMeta = await loadReviewTurns(sessionID)
+      const ratedMeta = turnsMeta[target.messageID]
+      const rated =
+        ratedMeta &&
+        (ratedMeta.rating !== undefined ||
+          ratedMeta.topologyRating !== undefined)
+          ? {
+              ...(ratedMeta.rating !== undefined
+                ? { rating: ratedMeta.rating }
+                : {}),
+              ...(ratedMeta.topologyRating !== undefined
+                ? { topologyRating: ratedMeta.topologyRating }
+                : {}),
+            }
+          : undefined
       const auto = (await loadAutoReview(target.providerID, target.modelID)) as
         | AutoReviewStat
         | undefined
@@ -4556,7 +4730,10 @@ export default Plugin.define({
         feedbackCount: count,
         // v0.9.0: turn statistics (input/output tokens / cost / measured speed). Included only for turns that have it (optional)
         ...(target.turn ? { turn: target.turn } : {}),
-        ...(await topologySnapshot(sessionID)),
+        ...(await topologySnapshot(sessionID, target.topology)),
+        // v1.1.1: this turn's human ratings (one review per turn; shown and
+        // used to disable re-rating)
+        ...(rated ? { rated } : {}),
         // sequential-chain plan (when injected). optional means omitting the key entirely
         ...(chainPlans.has(sessionID)
           ? { chainPlan: chainPlans.get(sessionID)!.plan }
@@ -4663,6 +4840,25 @@ export default Plugin.define({
                 "No response found.",
               ),
         )
+      // v1.1.1: one review per turn. A rating already recorded for this
+      // target message (quality or topology cost-performance) is final —
+      // re-pressing the buttons must not record a second sample.
+      const turnsMeta = await loadReviewTurns(sessionID)
+      const already = turnsMeta[target.messageID]
+      if (hasRating && already?.rating !== undefined)
+        return fail(
+          tr(
+            `このターンは評価済みです(${already.rating}/5)。1ターン1回のみ評価できます`,
+            `This turn is already rated (${already.rating}/5). One review per turn.`,
+          ),
+        )
+      if (hasTopologyRating && already?.topologyRating !== undefined)
+        return fail(
+          tr(
+            `このターンのトポロジーコスパは評価済みです(${already.topologyRating}/5)`,
+            `This turn's topology cost-performance is already rated (${already.topologyRating}/5).`,
+          ),
+        )
       if (hasRating) {
         await recordFeedback(
           target.providerID,
@@ -4672,13 +4868,25 @@ export default Plugin.define({
         )
       }
       if (hasTopologyRating) {
-        await recordTopologyCostPerformance(sessionID, topologyRating!)
+        await recordTopologyCostPerformance(
+          sessionID,
+          topologyRating!,
+          target.topology,
+          target.category || undefined,
+        )
       }
+      // Record the rating on the turn (persisted marker)
+      await upsertReviewTurn(sessionID, target.messageID, {
+        topology: target.topology,
+        category: target.category,
+        ...(hasRating ? { rating: rating! } : {}),
+        ...(hasTopologyRating ? { topologyRating: topologyRating! } : {}),
+      })
       const global = (await loadFeedback(target.providerID, target.modelID)) as
         | FeedbackStat
         | undefined
       const count = global?.count ?? 0
-      const topologyInfo = await topologySnapshot(sessionID)
+      const topologyInfo = await topologySnapshot(sessionID, target.topology)
       const parts = [
         hasRating
           ? tr(
@@ -5350,6 +5558,23 @@ export default Plugin.define({
       // rescue 復帰待機も全クリア
       rescueAttempts.clear()
       await ctx.storage.remove(RESCUE_KEY)
+      // v1.1.1: レビューのターン別メタ+評価済みマーカーもクリア
+      // (統計リセット後は各ターンを再度評価できるようにする。分類の割当て自体は残す)
+      try {
+        const reviewPage = await ctx.storage.scan({
+          prefix: REVIEW_PREFIX,
+          limit: 500,
+        })
+        for (const entry of reviewPage.entries) {
+          const value = entry.value as Record<string, unknown>
+          if (!value || typeof value !== "object") continue
+          if (!("turns" in value)) continue
+          const { turns: _drop, ...rest } = value
+          await ctx.storage.set(entry.key, rest)
+        }
+      } catch {
+        // レビュー記録のクリア失敗は統計リセットを妨げない
+      }
       // sequential-chain の実行状態もクリア
       chainPending.clear()
       chainPlans.clear()

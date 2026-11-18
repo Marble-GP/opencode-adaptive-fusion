@@ -322,6 +322,15 @@ export const AdaptiveFusion = Rpc.define({
           },
           // The orchestration topology decided in this session (the "topology used" row of /fusion-review)
           topology: { type: "string" },
+          // v1.1.1: this turn's recorded human ratings (one review per turn; shown to disable re-rating)
+          rated: {
+            type: "object",
+            properties: {
+              rating: { type: "number" },
+              topologyRating: { type: "number" },
+            },
+            additionalProperties: false,
+          },
           topologyRatingAverage: { type: "number" },
           topologyRatingCount: { type: "number" },
           // v0.9.0: observation metrics (D-3): overall stats of this topology (runs, ok-rate, measured latency, quality)

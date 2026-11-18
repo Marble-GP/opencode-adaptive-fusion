@@ -464,6 +464,99 @@ check("bandit: good pick keeps despite 2/2 neighbor", variantBanditPos([S(2, 2),
 check("bandit: boundary pos 0 escapes right", variantBanditPos([S(0, 3), undefined, undefined], 0, 3), 1);
 check("bandit: boundary pos 2 escapes left", variantBanditPos([undefined, undefined, S(0, 3)], 2, 3), 1);
 
+// --- Review turn grouping (mirror of groupReviewTurns, v1.1.1) ---
+// A turn = one user prompt + its assistant messages. A tool-using response has
+// several assistant messages; the review target is the turn's LAST assistant
+// message with text, and offset counts LOGICAL TURNS (not messages — the old
+// behavior landed on steps of the same turn and showed "stuck" stats).
+const groupReviewTurns = (context, messageText, userTextOf) => {
+  const chronological = [...context].sort(
+    (a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0),
+  );
+  const turns = [];
+  let current;
+  for (const message of chronological) {
+    if (message?.type === "user") {
+      const text = userTextOf(message).trim();
+      if (text.length === 0) continue;
+      current = { instruction: text, assistants: [] };
+      turns.push(current);
+    } else if (message?.type === "assistant" && message?.model) {
+      if (!current) {
+        current = { instruction: "", assistants: [] };
+        turns.push(current);
+      }
+      current.assistants.push(message);
+    }
+  }
+  return turns
+    .map((t) => ({
+      instruction: t.instruction,
+      assistant:
+        [...t.assistants].reverse().find((a) => messageText(a).length > 0) ??
+        t.assistants[t.assistants.length - 1],
+    }))
+    .filter((t) => t.assistant !== undefined)
+    .reverse();
+};
+const mt = (m) => (m?.text ?? "").trim();
+const ut = (m) => (m?.text ?? "").trim();
+const M = (type, id, text, created) => ({
+  type,
+  id,
+  text,
+  time: { created },
+  ...(type === "assistant" ? { model: { providerID: "p", id: "m" } } : {}),
+});
+// one logical turn with multiple steps (tool use): a single review target
+const multiStep = groupReviewTurns(
+  [
+    M("user", "u1", "fix the bug", 100),
+    M("assistant", "a1", "reading files...", 200),
+    M("assistant", "a2", "", 300), // tool-call step, no text
+    M("assistant", "a3", "fixed the bug", 400),
+  ],
+  mt,
+  ut,
+);
+check("multi-step turn is ONE review target", multiStep.length, 1);
+check("multi-step turn targets the final body", multiStep[0].assistant.id, "a3");
+check("multi-step turn keeps its instruction", multiStep[0].instruction, "fix the bug");
+// two logical turns: offset 0 = newest, offset 1 = previous
+const twoTurns = groupReviewTurns(
+  [
+    M("user", "u1", "first request", 100),
+    M("assistant", "a1", "first answer", 200),
+    M("user", "u2", "second request", 300),
+    M("assistant", "a2", "second answer", 400),
+  ],
+  mt,
+  ut,
+);
+check("two turns counted", twoTurns.length, 2);
+check("offset 0 targets the newest turn", twoTurns[0].assistant.id, "a2");
+check("offset 1 targets the previous turn", twoTurns[1].assistant.id, "a1");
+check("offset 1 instruction is that turn's", twoTurns[1].instruction, "first request");
+// empty user messages (attachments) do not split a turn
+const withAttach = groupReviewTurns(
+  [
+    M("user", "u1", "check this", 100),
+    M("user", "u2", "", 150), // attachment-only, no text
+    M("assistant", "a1", "checked", 200),
+  ],
+  mt,
+  ut,
+);
+check("attachment-only user message does not split a turn", withAttach.length, 1);
+// turn without any text body keeps its last assistant (preview shows empty)
+const noBody = groupReviewTurns(
+  [M("user", "u1", "do it", 100), M("assistant", "a1", "", 200)],
+  mt,
+  ut,
+);
+check("turn with no body still targetable", noBody.length, 1);
+check("no-body turn targets last assistant", noBody[0].assistant.id, "a1");
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);
