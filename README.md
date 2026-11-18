@@ -65,7 +65,7 @@ Install the plugin straight from this repository (the repository root is the
 plugin package; its `package.json` maps `exports` into `plugins/adaptive-fusion/`):
 
 ```bash
-opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.1.0'
+opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.2.0'
 ```
 
 OpenCode installs it into the **global** plugin configuration. Verify and manage it with:
@@ -76,7 +76,7 @@ opencode plugin update opencode-adaptive-fusion
 opencode plugin remove  opencode-adaptive-fusion
 ```
 
-Exact tags such as `v1.1.0` stay pinned to that tag; omit the `#…` suffix to track the
+Exact tags such as `v1.2.0` stay pinned to that tag; omit the `#…` suffix to track the
 default branch, and use `opencode plugin update` to jump forward. Restart OpenCode
 after installing (TUI parts load at startup).
 
@@ -681,6 +681,7 @@ automatically — but never silently:
 | **v0.9.1** | Repository-root `package.json` (CLI/git installs), `opencode plugin add` docs, source comments translated to English | **Released** |
 | **v1.0** | Audit auto-review as a gated routing signal (`autoReviewWeight`), full-turn cost model, strict recovery probe, OFF stops every model switch, `/fusion-weights` editor (renamed `/fusion-params` in v1.1), benchmark library auto-refresh | **Released** |
 | **v1.1** | Task-shape topology prior + Jev blend + ε exploration (`topologyExploreRate`, `topologyPriorStrength`), attempt-aware rescue (`rescueAttemptsBeforeSwitch`), reasoning-effort variant selection (`variantMode` auto/fixed, `variantFixed`, `variantExploreRate`, Jev effort hint), `/fusion-params` rename + command cleanup | **Released** |
+| **v1.2** | One review per turn + per-turn review stats, priority provider chain (`providerChain` via `/fusion-provider` stack editor), `/fusion-modellist` whitelist/blacklist stack editor, config-plumbing and routing audit fixes | **Released** |
 | v0.7b (next) | fan-out/fan-in, hierarchical, cost-guard completion | Planned |
 | v0.7c | collaboration, graph, statistic key separation | Planned |
 | v1.0+ | test harness, comparative experiments | Planned |

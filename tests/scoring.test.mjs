@@ -608,8 +608,10 @@ check("blacklist: empty list allows all", listAllows("blacklist", [], "opencode"
 check("blacklist: full ref excludes", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode-go", "qwen4-max"), false);
 check("blacklist: bare id excludes across providers", listAllows("blacklist", ["iceman-free"], "opencode", "iceman-free"), false);
 check("blacklist: others allowed", listAllows("blacklist", ["opencode-go/qwen4-max"], "opencode", "iceman-free"), true);
-check("whitelist: :free suffix normalized", listAllows("whitelist", ["opencode/iceman"], "opencode", "iceman-free"), true);
-check("blacklist: :free suffix normalized", listAllows("blacklist", ["opencode/iceman"], "opencode", "iceman-free"), false);
+check("whitelist: :free suffix entry matches free model", listAllows("whitelist", ["openrouter/z-ai/glm-4.6:free"], "openrouter", "z-ai/glm-4.6:free"), true);
+check("whitelist: suffix-less entry matches free model", listAllows("whitelist", ["openrouter/z-ai/glm-4.6"], "openrouter", "z-ai/glm-4.6:free"), true);
+check("blacklist: suffix-less entry excludes free model", listAllows("blacklist", ["openrouter/z-ai/glm-4.6"], "openrouter", "z-ai/glm-4.6:free"), false);
+check("hyphen-free model name is not the :free suffix", listAllows("whitelist", ["opencode/iceman"], "opencode", "iceman-free"), false);
 
 
 if (failures > 0) {
