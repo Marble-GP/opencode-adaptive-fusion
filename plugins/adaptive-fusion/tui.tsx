@@ -300,7 +300,7 @@ type FusionConfig = {
 const formatConfig = (c: FusionConfig, en = false): string => {
   const T = (ja: string, eng: string) => (en ? eng : ja)
   const lines = [
-    `provider      : ${c.providerID ?? "-"}${c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : (c.providerChain ?? []).length > 0 ? T(` (chain: ${(c.providerChain ?? []).join(" -> ")})`, ` (chain: ${(c.providerChain ?? []).join(" -> ")})`) : ""}`,
+    `provider      : ${c.providerID ?? "-"}${(c.providerChain ?? []).length > 0 ? T(` (chain: ${(c.providerChain ?? []).join(" -> ")})`, ` (chain: ${(c.providerChain ?? []).join(" -> ")})`) : c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : ""}`,
     `routing       : ${c.enabled ? "ON" : "OFF"}`,
     `lang          : ${c.lang ?? "-"}`,
     `exploreRate   : ${c.exploreRate ?? "-"} (learning ${c.learningRate ?? "-"} / minObs ${c.minObservations ?? "-"})`,
@@ -317,7 +317,7 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `  heavy        : ${((c.tiers?.heavy ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  middle       : ${((c.tiers?.middle ?? []).join(", ")) || T("(空)", "(empty)")}`,
     `  light        : ${((c.tiers?.light ?? []).join(", ")) || T("(空)", "(empty)")}`,
-    `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${T("(ホワイトリスト空時のみ)", " (only when the whitelist is empty)")}`,
+    `cost cap      : input ${c.maxInputCost ?? 0} / output ${c.maxOutputCost ?? 0} USD/Mtoken${c.listMode === "blacklist" ? T("(ブラックリストモードでは常に適用)", " (always applied in blacklist mode)") : (c.models ?? []).length === 0 ? T("(リスト空時に適用)", " (applied when the list is empty)") : T("(ホワイトリスト優先)", " (whitelist takes precedence)")}`,
     `bench prior   : weight ${c.benchmarkPriorWeight ?? "-"}${c.benchmarksFile ? ` / ${c.benchmarksFile}` : ""}${c.benchAutoUpdate === false ? " / auto-refresh OFF" : c.benchAutoUpdate === true ? (c.benchmarksFile ? " / auto-refresh skipped (custom file)" : " / auto-refresh ON (daily)") : ""}`,
     `kinds         : ${(c.kinds ?? []).join(", ")}`,
     `models        : ${c.listMode === "blacklist" ? T("ブラックリスト(リスト以外はコスト上限内で全候補)", "blacklist (everything except the list, within the cost caps)") : T("ホワイトリスト", "whitelist")} — ${(c.models ?? []).length === 0 ? (c.listMode === "blacklist" ? T("(無効=全候補)", "(inactive = all candidates)") : T("(全候補 + コスト上限)", "(all candidates + cost cap)")) : (c.models ?? []).join(", ")}`,
@@ -1870,21 +1870,28 @@ export default Plugin.define({
               const unchanged =
                 JSON.stringify(chain) === JSON.stringify(seed)
               if (unchanged) return
+              // v1.1.1: clearing the model list is necessary for whitelist
+              // entries (a stale whitelist from the old provider would block
+              // every chain candidate), but blacklist entries are deliberate
+              // exclusions that stay valid across providers — keep them.
+              const listMode = current.config.listMode ?? "whitelist"
+              const resetList =
+                listMode === "whitelist" ? { models: [] } : {}
               const result =
                 chain.length >= 2
                   ? await fusion.config(
-                      { update: { providerChain: chain, models: [] } },
+                      { update: { providerChain: chain, ...resetList } },
                       { location: location() },
                     )
                   : chain.length === 1
                     ? await fusion.config(
                         // Single entry left = plain single-provider mode
-                        { update: { providerID: chain[0], models: [] } },
+                        { update: { providerID: chain[0], ...resetList } },
                         { location: location() },
                       )
                     : await fusion.config(
                         // Empty stack = clear the chain (single provider stays)
-                        { update: { providerChain: [], models: [] } },
+                        { update: { providerChain: [], ...resetList } },
                         { location: location() },
                       )
               const c = result.config

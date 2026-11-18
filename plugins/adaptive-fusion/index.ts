@@ -385,8 +385,8 @@ export default Plugin.define({
         1,
         Math.floor(num(ctx.options.minObservations, 5)),
       ),
-      costWeight: num(ctx.options.costWeight, 0.1),
-      latencyWeight: num(ctx.options.latencyWeight, 0.05),
+      costWeight: clamp(num(ctx.options.costWeight, 0.1), 0, 1),
+      latencyWeight: clamp(num(ctx.options.latencyWeight, 0.05), 0, 1),
       maxInputCost: Math.max(0, num(ctx.options.maxInputCost, 0)),
       maxOutputCost: Math.max(0, num(ctx.options.maxOutputCost, 0)),
       benchmarkPriorWeight: Math.max(
@@ -410,7 +410,11 @@ export default Plugin.define({
         Array.isArray(ctx.options.kinds) && ctx.options.kinds.length > 0
           ? ctx.options.kinds
           : ["primary"],
-      models: [],
+      models:
+        Array.isArray(ctx.options.models) &&
+        ctx.options.models.every((m) => typeof m === "string")
+          ? [...(ctx.options.models as string[])]
+          : [],
       reviewModel:
         typeof ctx.options.reviewModel === "string" &&
         ctx.options.reviewModel.includes("/")
@@ -474,6 +478,16 @@ export default Plugin.define({
       ),
     }
 
+    // v1.1.1: enforce the chain invariants right after the options init (the
+    // update path enforces them; the options path did not): a chain wins over
+    // crossProvider, and without an explicit options.providerID the primary
+    // chain entry is the display/fallback provider.
+    if (cfg.providerChain.length > 0) {
+      if (typeof ctx.options.providerID !== "string")
+        cfg.providerID = cfg.providerChain[0]
+      cfg.crossProvider = false
+    }
+
     // Display-language helper (v0.9.0). First argument is Japanese, second is English.
     // Also changeable from TUI/RPC, applied immediately.
     const tr = (ja: string, en: string): string =>
@@ -494,15 +508,18 @@ export default Plugin.define({
       // v1.1.1: provider chain restore
       if (Array.isArray(s.providerChain))
         cfg.providerChain = sanitizeProviderChain(s.providerChain)
+      // v1.1.1: a restored chain wins over crossProvider (the routing
+      // path prefers the chain; keep the flags mutually exclusive).
+      if (cfg.providerChain.length > 0) cfg.crossProvider = false
       if (typeof s.exploreRate === "number")
         cfg.exploreRate = clamp(s.exploreRate, 0, 1)
       if (typeof s.learningRate === "number")
         cfg.learningRate = clamp(s.learningRate, 0, 1)
       if (typeof s.minObservations === "number")
         cfg.minObservations = Math.max(1, Math.floor(s.minObservations))
-      if (typeof s.costWeight === "number") cfg.costWeight = s.costWeight
+      if (typeof s.costWeight === "number") cfg.costWeight = clamp(s.costWeight, 0, 1)
       if (typeof s.latencyWeight === "number")
-        cfg.latencyWeight = s.latencyWeight
+        cfg.latencyWeight = clamp(s.latencyWeight, 0, 1)
       if (typeof s.maxInputCost === "number")
         cfg.maxInputCost = Math.max(0, s.maxInputCost)
       if (typeof s.maxOutputCost === "number")
@@ -517,6 +534,7 @@ export default Plugin.define({
         cfg.classifierModel = s.classifierModel.includes("/")
           ? s.classifierModel
           : null
+      else if (s.classifierModel === null) cfg.classifierModel = null
       if (typeof s.reviewModel === "string")
         cfg.reviewModel = s.reviewModel.includes("/")
           ? s.reviewModel
@@ -1770,11 +1788,13 @@ export default Plugin.define({
           (expand
             ? // Emergency expansion (v0.8.1): goes beyond the whitelist, but applies costOK
               // to keep seamless fallback to paid models within the user's budget.
-              // Free models are unaffected by the cap and pass through as-is.
+              // Free models are unaffected by the cap and pass through as-is
+              // (v1.1.1: both entry forms match, like the normal branches).
               // Blacklisted models stay excluded (deliberate user exclusion).
               blacklistMode ||
               list.size === 0 ||
               list.has(refFor(m.providerID, m.id)) ||
+              list.has(m.id) ||
               costOK(m)
             : blacklistMode
               ? // Blacklist mode: chain/provider scope still applies; the
@@ -1789,7 +1809,11 @@ export default Plugin.define({
                   ? list.size === 0 ||
                     list.has(refFor(m.providerID, m.id))
                   : m.providerID === cfg.providerID &&
-                    (list.size === 0 || list.has(m.id))),
+                    // v1.1.1: accept both entry forms (the /fusion-modellist UI
+                    // recommends provider/model-id even in single-provider mode)
+                    (list.size === 0 ||
+                      list.has(m.id) ||
+                      list.has(refFor(m.providerID, m.id)))),
       )
     }
     // ------------------------------------------------------------------
@@ -4315,10 +4339,13 @@ export default Plugin.define({
       // v1.1.1: provider-chain priority narrowing. Restrict candidates to the
       // earliest chain entry that still has eligible, non-cooling candidates.
       // On rescue, only models with observed records count (same rule as the
-      // tier narrowing below). When every chain entry is exhausted, keep the
-      // full candidate pool (emergency-expanded on rescue) as the last resort.
+      // tier narrowing below) — a chain entry whose only healthy models are
+      // unobserved is skipped so the chain falls through to the next entry
+      // instead of stalling on an unobservable provider. When every chain
+      // entry is exhausted, keep the full candidate pool (emergency-expanded
+      // on rescue) as the last resort.
       let chainTag: string | undefined
-      if (cfg.providerChain.length > 0 && !emergency) {
+      if (cfg.providerChain.length > 0) {
         const observed = new Set<string>()
         if (rescue) {
           for (const m of models) {
@@ -4332,6 +4359,8 @@ export default Plugin.define({
           cfg.providerChain,
           (m) => {
             const ref = refFor(m.providerID, m.id)
+            // cool() also honors the provider-scoped free-tier cooldown
+            // (which only blocks free models — paid ones stay eligible).
             return !cool(ref) && (!rescue || observed.has(ref))
           },
         )
@@ -4340,28 +4369,12 @@ export default Plugin.define({
           models = models.filter((m) => m.providerID === pid)
           chainTag = `chain[${chainIdx}] ${pid}`
           logRoute(
-            `CHAIN ${chainTag} (${models.length} models, load=${sessionID ? sessionLoad.get(sessionID) ?? "?" : "?"})`,
+            `CHAIN ${chainTag}${emergency ? " (emergency, " : " ("}${models.length} models, load=${sessionID ? sessionLoad.get(sessionID) ?? "?" : "?"})`,
           )
         } else {
           logRoute(
             `CHAIN exhausted (${cfg.providerChain.join(" -> ")}) -> full pool`,
           )
-        }
-      } else if (cfg.providerChain.length > 0 && emergency) {
-        // Rescue with emergency expansion: still prefer the chain order, but
-        // from the widened pool (a chain entry may be reachable via a paid
-        // model even when its free tier is down).
-        const chainIdx = firstHealthyChainIndex(models, cfg.providerChain, (m) => {
-          const ref = refFor(m.providerID, m.id)
-          if (cool(ref)) return false
-          // provider-scoped free-tier cooldown only blocks free models
-          return true
-        })
-        if (chainIdx >= 0) {
-          const pid = cfg.providerChain[chainIdx]
-          models = models.filter((m) => m.providerID === pid)
-          chainTag = `chain[${chainIdx}] ${pid}`
-          logRoute(`CHAIN ${chainTag} (emergency, ${models.length} models)`)
         }
       }
 
@@ -4725,6 +4738,13 @@ export default Plugin.define({
               sessionID: event.sessionID,
               model: { providerID: choice.providerID, id: choice.id },
             })
+            // v1.1.1: record the restore ticket here too (every other rescue
+            // site does) — without it the original model is never restored.
+            rescueAttempts.set(event.sessionID, {
+              originalRef: currentRef,
+              deadline: Date.now() + RESCUE_WINDOW_MS,
+            })
+            void persistRescue()
           } catch {
             // Persist failure does not affect the swap for the current dispatch
           }
@@ -5216,18 +5236,18 @@ export default Plugin.define({
             "(routing: OFF / no model switches; passive learning continues)",
           ),
         )
-      if (cfg.crossProvider)
-        lines.push(
-          tr(
-            "(モード: crossProvider / 全プロバイダー混合)",
-            "(mode: crossProvider / all providers mixed)",
-          ),
-        )
-      else if (cfg.providerChain.length > 0)
+      if (cfg.providerChain.length > 0)
         lines.push(
           tr(
             `(モード: プロバイダーチェーン ${cfg.providerChain.join(" -> ")} / 先頭を優先、尽きたら次へ)`,
             `(mode: provider chain ${cfg.providerChain.join(" -> ")} / prefer the first, fall through on exhaustion)`,
+          ),
+        )
+      else if (cfg.crossProvider)
+        lines.push(
+          tr(
+            "(モード: crossProvider / 全プロバイダー混合)",
+            "(mode: crossProvider / all providers mixed)",
           ),
         )
       else
@@ -5705,8 +5725,12 @@ export default Plugin.define({
         // v1.1: variant outcome learning (B6) — reset clears it too
         VARIANT_PREFIX,
       ]) {
-        const page = await ctx.storage.scan({ prefix, limit: 500 })
-        for (const entry of page.entries) await ctx.storage.remove(entry.key)
+        // v1.1.1: page through the whole prefix (>500 keys left residue before)
+        for (;;) {
+          const page = await ctx.storage.scan({ prefix, limit: 500 })
+          for (const entry of page.entries) await ctx.storage.remove(entry.key)
+          if (page.entries.length < 500) break
+        }
       }
       // クールダウン(利用不可フラグ)もクリア
       // v0.8.1: マージ方式の persist に削除が反映されるよう tombstone 化。
@@ -5724,16 +5748,20 @@ export default Plugin.define({
       // v1.1.1: レビューのターン別メタ+評価済みマーカーもクリア
       // (統計リセット後は各ターンを再度評価できるようにする。分類の割当て自体は残す)
       try {
-        const reviewPage = await ctx.storage.scan({
-          prefix: REVIEW_PREFIX,
-          limit: 500,
-        })
-        for (const entry of reviewPage.entries) {
-          const value = entry.value as Record<string, unknown>
-          if (!value || typeof value !== "object") continue
-          if (!("turns" in value)) continue
-          const { turns: _drop, ...rest } = value
-          await ctx.storage.set(entry.key, rest)
+        // v1.1.1: page through every review record (>500 sessions left residue)
+        for (;;) {
+          const reviewPage = await ctx.storage.scan({
+            prefix: REVIEW_PREFIX,
+            limit: 500,
+          })
+          for (const entry of reviewPage.entries) {
+            const value = entry.value as Record<string, unknown>
+            if (!value || typeof value !== "object") continue
+            if (!("turns" in value)) continue
+            const { turns: _drop, ...rest } = value
+            await ctx.storage.set(entry.key, rest)
+          }
+          if (reviewPage.entries.length < 500) break
         }
       } catch {
         // レビュー記録のクリア失敗は統計リセットを妨げない
@@ -5750,6 +5778,8 @@ export default Plugin.define({
       lastHttpFailure.clear()
       rescueSwitchedAt.clear()
       rescueInFlight.clear()
+      // in-flight recovery probes also stop re-marking cooldowns after reset
+      verifyingNow.clear()
       lastResolved.clear()
     }
 
@@ -5765,6 +5795,8 @@ export default Plugin.define({
         // v1.1.1: /fusion-provider returns to single-provider mode — a chain
         // pointing at the old primary would silently override the new one.
         if (!("providerChain" in update)) cfg.providerChain = []
+        // Single-provider mode and crossProvider are mutually exclusive.
+        if (!("crossProvider" in update)) cfg.crossProvider = false
       }
       if (typeof update.crossProvider === "boolean") {
         // Switching crossProvider changes the whitelist format (model IDs vs provider/model-ids), so clear by default.
@@ -5780,16 +5812,22 @@ export default Plugin.define({
         const chain = sanitizeProviderChain(update.providerChain)
         cfg.providerChain = chain
         if (chain.length > 0) {
-          if (update.providerID !== cfg.providerID && !("providerID" in update))
+          // Same rule as a plain providerID change: mirroring chain[0] into
+          // providerID is a provider change, so a stale list from the old
+          // provider is cleared unless the update carries its own models.
+          if (!("providerID" in update)) {
+            if (chain[0] !== cfg.providerID && !("models" in update))
+              cfg.models = []
             cfg.providerID = chain[0]
+          }
           cfg.crossProvider = false
         }
       }
       if (typeof update.exploreRate === "number") cfg.exploreRate = clamp(update.exploreRate, 0, 1)
       if (typeof update.learningRate === "number") cfg.learningRate = clamp(update.learningRate, 0, 1)
       if (typeof update.minObservations === "number") cfg.minObservations = Math.max(1, Math.floor(update.minObservations))
-      if (typeof update.costWeight === "number") cfg.costWeight = update.costWeight
-      if (typeof update.latencyWeight === "number") cfg.latencyWeight = update.latencyWeight
+      if (typeof update.costWeight === "number") cfg.costWeight = clamp(update.costWeight, 0, 1)
+      if (typeof update.latencyWeight === "number") cfg.latencyWeight = clamp(update.latencyWeight, 0, 1)
       if (typeof update.maxInputCost === "number") cfg.maxInputCost = Math.max(0, update.maxInputCost)
       if (typeof update.maxOutputCost === "number") cfg.maxOutputCost = Math.max(0, update.maxOutputCost)
       if (typeof update.benchmarkPriorWeight === "number") cfg.benchmarkPriorWeight = Math.max(0, update.benchmarkPriorWeight)
@@ -5811,7 +5849,19 @@ export default Plugin.define({
         update.tierMode === "auto"
       )
         cfg.tierMode = update.tierMode
-      if (update.tiers && typeof update.tiers === "object") cfg.tiers = sanitizeTiers(update.tiers)
+      if (update.tiers && typeof update.tiers === "object") {
+        // v1.1.1: merge per tier — only tiers present in the update change.
+        // The /fusion-tiers dialog omits empty tiers (meaning "unchanged"),
+        // and a whole-object replace cleared them against that promise.
+        const incoming = update.tiers as Record<string, unknown>
+        for (const tier of ["heavy", "middle", "light"] as const) {
+          if (!Array.isArray(incoming[tier])) continue
+          if (!incoming[tier].every((m) => typeof m === "string")) continue
+          cfg.tiers[tier] = sanitizeTiers({
+            [tier]: incoming[tier] as string[],
+          })[tier]
+        }
+      }
       if (
         update.variantMode === "off" ||
         update.variantMode === "auto" ||
@@ -5831,16 +5881,25 @@ export default Plugin.define({
         )
         cfg.allowedTopologies = filtered.length > 0 ? filtered : ["single"]
       }
+      // v1.1.1: kinds updates were silently dropped (rpc accepted them).
+      // Mutate in place — `kinds` is captured by reference elsewhere.
+      if (Array.isArray(update.kinds) && update.kinds.every((k) => typeof k === "string") && (update.kinds as string[]).length > 0) {
+        cfg.kinds.length = 0
+        cfg.kinds.push(...(update.kinds as string[]))
+      }
       if (typeof update.classifierModel === "string") {
         cfg.classifierModel =
           update.classifierModel.includes("/") ? update.classifierModel : null
       }
+      // v1.1.1: explicit null clears (mirrors variantFixed)
+      if (update.classifierModel === null) cfg.classifierModel = null
       if (typeof update.reviewModel === "string") {
         // Empty string means the review model is unset (= revert to classifierModel / shared fallback)
         if (update.reviewModel.length === 0) cfg.reviewModel = null
         else if (update.reviewModel.includes("/"))
           cfg.reviewModel = update.reviewModel
       }
+      if (update.reviewModel === null) cfg.reviewModel = null
       if (Array.isArray(update.models) && update.models.every((m) => typeof m === "string"))
         cfg.models = update.models as string[]
       // v1.1.1: whitelist/blacklist interpretation of the model list

@@ -575,6 +575,14 @@ check("chain: eligibility filter respected", firstHealthyChainIndex([P("opencode
 check("chain: all exhausted -> -1", firstHealthyChainIndex([P("anthropic")], ["opencode-go", "opencode"], okM), -1);
 check("chain: empty chain -> -1", firstHealthyChainIndex([P("opencode-go")], [], okM), -1);
 check("chain: out-of-chain candidates ignored", firstHealthyChainIndex([P("anthropic"), P("opencode")], ["opencode-go", "opencode"], okM), 1);
+// rescue: chain[0] has only UNOBSERVED non-cooling models -> falls through to chain[1]
+// (the observed-only rule must apply in the emergency branch too — otherwise
+// rescue narrows to an unobservable provider and stalls)
+check(
+  "chain: rescue falls through when chain[0] is unobserved",
+  firstHealthyChainIndex([P("opencode-go"), P("opencode")], ["opencode-go", "opencode"], (m) => m.providerID !== "opencode-go"),
+  1,
+);
 
 // --- Model list mode (mirror of the candidates() list predicate, v1.1.1) ---
 // whitelist: only listed models (empty = all); blacklist: everything except

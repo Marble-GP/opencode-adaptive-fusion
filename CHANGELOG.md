@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v1.1.1 (bug fixes)
+## [1.2.0] - 2026-11-18
 
 ### Fixed
 - **One review per turn (`/fusion-review`)**: a turn could be rated any number
@@ -46,6 +46,54 @@
   editable per entry. Toggling the mode clears the list (the meaning
   inverts, so stale entries are dangerous). The `/fusion-whitelist` command
   was removed (it renamed into `/fusion-modellist`).
+
+### Fixed (v1.2.0 audit)
+
+- **Single-provider whitelist ignored full refs**: the default
+  single-provider mode matched only bare `model-id` entries, so the
+  `provider/model-id` entries the `/fusion-modellist` UI recommends silently
+  matched nothing (empty candidate pool, routing always `KEEP`). Both entry
+  forms now match in every branch, including emergency expansion (bare ids
+  were dropped there too).
+- **Provider chain rescue stalled on unobserved providers (audit)**: the
+  emergency chain narrowing skipped the "observed records only on rescue"
+  rule, so a chain[0] with only unobserved non-cooling models (e.g. paid
+  models after the free tier died) narrowed rescue to an unobservable
+  provider and the session stalled instead of falling through to chain[1].
+  The rule now applies in both branches (the dead branch was removed).
+- **`models` option was never read (audit)**: the documented
+  `opencode.json` `models` whitelist/blacklist was silently ignored; options
+  now seed the list like every other option.
+- **`/fusion-tiers` empty input cleared the tier (audit)**: the server
+  full-replaced the `tiers` object, so the dialog's "empty keeps this tier
+  unchanged" promise was false. Tiers now merge per-tier — only tiers present
+  in the update change.
+- **`classifierModel`/`reviewModel` null round-trip (audit)**: an explicit
+  `null` (or empty-string) clear now survives config resync/restart even
+  when `opencode.json` options set the field; `kinds` updates via RPC were
+  silently dropped and are now applied (in-place, like the persisted path).
+- **Mode-transition symmetry (audit)**: saving a single provider stack entry
+  also turns `crossProvider` off; a chain update mirrors `chain[0]` into
+  `providerID` and clears a stale model list (same rule as a plain provider
+  change); options-only chains enforce the same invariants (mirror +
+  `crossProvider=false`); a restored chain wins over `crossProvider`.
+- **`costWeight`/`latencyWeight` unclamped (audit)**: negative values turned
+  the cost/latency penalty into a bonus for expensive/slow models. All three
+  config stages now clamp to 0..1.
+- **Resolve-hook same-provider rescue never recorded a restore ticket
+  (audit)**: the original model was permanently replaced with no
+  auto-restore; it now records `rescueAttempts` like every other rescue site.
+- **`/fusion-provider` wiped blacklist exclusions (audit)**: saving a
+  provider/chain change cleared the model list even in blacklist mode, where
+  entries are deliberate exclusions that stay valid across providers. The
+  list is now reset only in whitelist mode.
+- **`resetStats` pagination (audit)**: storage scans paged through all keys
+  (>500 left residue); in-flight recovery probes no longer re-mark cooldowns
+  after a reset.
+- **Display precedence (audit)**: a provider chain now takes precedence over
+  `crossProvider` in both `/fusion-stats` and `/fusion-config` (the routing
+  path already preferred the chain), and the cost-cap line reflects blacklist
+  mode (caps always apply).
 
 ## [1.1.0] - 2026-11-18
 
