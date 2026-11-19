@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — v1.2.1 (in development)
+## [1.2.1] - 2026-11-19
 
 ### Added
 - **Chain promotion (`chainPromote`, default ON)**: with routing ON and a
@@ -8,8 +8,12 @@
   priority than the highest healthy chain entry is switched to that entry
   **once per prompt** (not per dispatch — no provider ping-pong, caches stay
   warm). The target model is the best-scoring candidate within the entry
-  (score/warmup logic, no exploration); the switch records a restore ticket
-  so a later demotion can climb back the same way. This fixes the "free
+  (score/warmup logic, no exploration); the promotion does **not** record a
+  rescue restore ticket (it is a priority decision, not a rescue — the lower
+  entry is still healthy), and any stale ticket pointing at it is cleared so
+  the session is not dragged back down next prompt. A later rescue that falls
+  through to a lower entry records its own restore ticket for the failed
+  higher entry. This fixes the "free
   models keep winning despite `opencode-go` being chain[0]" confusion:
   previously only *rescue* moved sessions across chain entries — a healthy
   session on `opencode`'s free tier never climbed back to the subscription

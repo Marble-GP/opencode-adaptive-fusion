@@ -3720,12 +3720,15 @@ export default Plugin.define({
           sessionID,
           model: { providerID: chosen.providerID, id: chosen.id },
         })
-        // Record the restore ticket: if the higher entry later dies, rescue
-        // restore can bring the session back to the previous entry.
-        rescueAttempts.set(sessionID, {
-          originalRef: currentRef,
-          deadline: Date.now() + RESCUE_WINDOW_MS,
-        })
+        // NOTE: do NOT record a rescue restore ticket here. Promotion is not a
+        // rescue — the lower entry is still healthy, and recording it as an
+        // "original" would make maybeRestoreFromRescue switch the session
+        // straight back down on the next prompt. A later rescue that falls
+        // through to a lower entry records its own restore ticket for the
+        // failed higher entry.
+        // Clear any stale rescue restore ticket pointing at the lower entry
+        // we just left, so the session is not dragged back down next prompt.
+        rescueAttempts.delete(sessionID)
         void persistRescue()
         logRoute(
           `PROMOTE ${sessionID} ${currentRef} -> ${chosen.providerID}/${chosen.id} (chain[${chainIdx}] ${pid} > chain[${currentIdx}] ${currentProvider}, ${chosen.reason})`,
