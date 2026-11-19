@@ -14,19 +14,36 @@ rate limits, and continuously improves from HTTP outcomes and human/LLM reviews.
 - **Observe-only by default** — the plugin starts with routing disabled, collects
   success-rate/latency statistics, and only routes after you enable it.
 - **Automatic rescue** — detects unusable models (quota exhaustion, provider errors),
-  cools them down with live verification, and moves the session to a healthy model.
+  cools them down with live verification, and moves the session to a healthy model
+  after a configurable attempt budget (`rescueAttemptsBeforeSwitch`, default 3 —
+  the core's internal retries get to finish first).
   **Rescue runs only while routing is enabled**: `/fusion-toggle` OFF stops every
   user-visible model switch (routing, rescue, restore), while passive learning
   (observation, classification, shadow review, recovery probes) keeps running
   in the background so nothing is lost while paused.
-- **Review & feedback loop** — `/fusion-review` rates responses (1–5), shows per-turn
-  token/cost/throughput statistics, and can review **older turns** after a bug surfaces.
+- **Provider chain** — a priority-ordered fallback list (e.g. `opencode-go` →
+  `opencode` → `openrouter`): candidates come from the first provider that
+  still has healthy models; when one is exhausted (quota / account-wide
+  free-tier cooldown) the next takes over, and sessions return to the original
+  provider once it recovers. Set with the `/fusion-provider` stack editor.
+- **Model list, whitelist or blacklist** — `/fusion-modellist` manages the
+  candidate list as a provider-grouped stack editor: whitelist only the models
+  you want, or blacklist the few you don't (everything else stays eligible
+  within the cost caps).
+- **Reasoning-effort selection** — picks the model first, then the thinking
+  level (`#low`/`#high`/`#max` variants) from the task's difficulty, the
+  model's weight class and per-variant outcome learning; your explicit
+  variant choice always wins. Configure with `/fusion-variantmode`.
+- **Review & feedback loop** — `/fusion-review` rates responses (1–5, one
+  review per turn), shows per-turn token/cost/throughput statistics, and can
+  review **older turns** after a bug surfaces.
 - **Shadow auto-review** — a separate lightweight model scores every response on four
   axes (instruction / accuracy / completeness / cost-efficiency) and enumerates what
   the response actually accomplished. Displayed in the review panel; can optionally
   feed the routing score behind gates (`autoReviewWeight`, default off).
 - **Topology awareness** — classifies orchestration shape (single / router /
-  sequential-chain) and, with a Jev (TypeSafe) key, selects it probabilistically.
+  sequential-chain) from a task-shape prior, blends it with a Jev (TypeSafe)
+  judgment when a key is configured, and explores alternatives with ε-greedy.
 - **Tier routing** — routes by task load (Light / Middle / Heavy) with upward cascading.
 
 All routing decisions, cooldowns, statistics, reviews and configuration are stored per
@@ -50,7 +67,8 @@ The plugin has no runtime npm dependencies. Optional integrations:
 
 - **Jev / TypeSafe** (`TYPESAFE_API_KEY` or `/fusion-jev-key`) for probabilistic
   task classification, topology choice and load estimation.
-- **OpenRouter** (or any second provider) for cross-provider routing.
+- **OpenRouter** (or any second provider) for cross-provider routing or as a
+  provider-chain fallback target.
 
 ---
 
@@ -241,7 +259,7 @@ defaults only.
 
 | Command | What it does | What you see |
 | --- | --- | --- |
-| `/fusion-stats` | Prints the learning report. | Per-model success rate, observations and latency; model and provider cool-downs; human rating averages; active cost caps; benchmark prior (`k`, model count, `fetchedAt`, seed vs auto-refreshed snapshot) and the auto-refresh state with its last result; Jev availability; topology and tier summaries. Read-only. |
+| `/fusion-stats` | Prints the learning report. | Per-model success rate, observations and latency; model and provider cool-downs; human rating averages; active cost caps (with chain / list-mode context); benchmark prior (`k`, model count, `fetchedAt`, seed vs auto-refreshed snapshot) and the auto-refresh state with its last result; Jev availability; topology and tier summaries; variant outcome records (`variantMode`); and the route log (`ROUTE`/`KEEP`/`CHAIN`/`VARIANT`/`WAIT`/`RETRY` traces). Read-only. |
 | `/fusion-config` | Prints the effective configuration (saved settings merged over `opencode.json` options). | Provider (single / chain), model list mode (`listMode`) and entries, kinds, routing weights, benchmark settings (`benchAutoUpdate`, auto-refresh mode), review/audit models and weights, topology and tier settings. Read-only — change values with the commands below. |
 | `/fusion-probe` | Sends one test prompt to every candidate model after a confirmation dialog (up to 16 models, 4 in parallel, ~20 s each). | Per-model OK/failure and latency; the run is recorded in the learning statistics and failing models are cooled down. |
 
@@ -250,7 +268,7 @@ defaults only.
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
-| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window). | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off); the whitelist is reset with it, because model ids depend on the provider. |
+| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window). | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off). A whitelist is reset with it (model ids depend on the provider); **blacklist entries are kept** — they are deliberate exclusions that stay valid across providers. |
 | `/fusion-modellist` | Edits the routing model list with a **stack editor**: `➕ add a model` stacks a typed entry (`provider/model-id` recommended, Enter to add), entries are **grouped by provider**, and each entry can be removed or edited from its entry menu. A `⇄ mode` toggle switches between **whitelist** (only listed models are candidates; empty = all candidates + cost caps) and **blacklist** (every candidate **except** the listed ones, within the cost caps — handy for excluding just a few bad models; a bare `model-id` entry excludes that model on every provider). Toggling the mode clears the list (the meaning inverts, so stale entries are dangerous). | `models`, `listMode` — the same `models` field holds the entries in both modes. |
 
 ### Score tuning
@@ -267,7 +285,7 @@ defaults only.
 | `/fusion-chainmode` | Toggles sequential-chain planning injection `off ↔ active`. | `chainMode` — `off` decides and records the shape only; `active` injects the planner plan on chain turns. |
 | `/fusion-variantmode` | Opens a dialog to configure reasoning-effort (thinking level) selection: **auto** (Jev/LLM effort hint + weight-class compensation + ε exploration + per-variant learning), **fixed** (always a variant you specify, e.g. `high` — skipped for models without it), or **off**. **Model first, then variant** in every active mode. | `variantMode`, `variantFixed` (fixed mode) — an explicit variant choice (`ctrl+t`, agent config) always wins over auto; rescue switches keep the target model's default variant. |
 | `/fusion-tiermode` | Cycles tier routing `off → manual → auto`. | `tierMode` — `manual` uses the groups from `/fusion-tiers`; `auto` trisects candidates by benchmark score. |
-| `/fusion-tiers` | Edits the Heavy / Middle / Light model groups (comma-separated `provider/model` refs). | `tiers` — empty input keeps the current group; enable the result with `/fusion-tiermode manual`. |
+| `/fusion-tiers` | Edits the Heavy / Middle / Light model groups (comma-separated `provider/model` refs). v1.2: groups merge per tier — only the groups you actually edited change; empty input keeps the current group. | `tiers` — enable the result with `/fusion-tiermode manual`. |
 
 ### Review
 
@@ -286,7 +304,7 @@ defaults only.
 
 | Command | What it does | What it sets |
 | --- | --- | --- |
-| `/fusion-reset` | Asks for confirmation, then clears the learning state: per-model/task statistics, human ratings, shadow/audit scores, topology statistics, model and provider cool-downs, and rescue/chain bookkeeping. | Configuration, benchmark snapshots and saved reviews are left untouched. |
+| `/fusion-reset` | Asks for confirmation, then clears the learning state: per-model/task statistics, human ratings, shadow/audit scores, topology statistics, variant outcome records, model and provider cool-downs, rescue/chain bookkeeping, and the review rated-turn markers (so turns become rateable again). | Configuration, benchmark snapshots and saved review assignments are left untouched. |
 
 TUI changes may require an OpenCode restart to appear. Every option referenced above is
 listed with its default in [Configuration](#configuration).
@@ -305,15 +323,15 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | `providerChain` | `[]` | Priority-ordered provider fallback chain (e.g. `["opencode-go","opencode","openrouter"]`). Empty = single-provider routing via `providerID`. Candidates come from the first entry with healthy models; exhausted entries (quota / account-wide free-tier cooldown) fall through to the next. Set with the `/fusion-provider` stack editor. |
 | `crossProvider` | `false` | Mix all connected providers when routing. Whitelist then uses full `provider/model-id` references. |
 | `listMode` | `"whitelist"` | How the `models` list is interpreted: `whitelist` = only listed models are candidates (empty = all candidates + cost caps). `blacklist` = every candidate **except** the listed ones — the cost caps always apply, and a blacklisted model stays excluded even during rescue's emergency expansion. Toggle with `/fusion-modellist`. |
-| `models` | `[]` | The routing model list (`listMode` decides the meaning). Whitelist entries use the full `provider/model-id` form; a bare `model-id` matches within any allowed provider (and excludes that model on every provider in blacklist mode). |
+| `models` | `[]` | The routing model list (`listMode` decides the meaning). Entries match the full `provider/model-id` form and the bare `model-id` form (a bare id matches within any allowed provider, and excludes that model on every provider in blacklist mode); the `:free` suffix is normalized, so `openrouter/z-ai/glm-4.6` matches `…glm-4.6:free` too. |
 | `enabled` | `false` | Initial routing state (toggle at runtime). |
 | `exploreRate` | `0.05` | ε-greedy exploration rate in steady state. |
 | `learningRate` | `0.3` | Exploration rate during the learning phase. |
 | `minObservations` | `5` | Cold-start threshold: models with fewer observations are explored preferentially. |
 | `classifierModel` | (none) | Lightweight model for task classification (`provider/model`). Classification is disabled when unset. |
 | `categories` | 6 | `coding / debugging / review / research / writing / ops`. |
-| `costWeight` | `0.1` | Cost penalty weight in the routing score. |
-| `latencyWeight` | `0.05` | Relative latency penalty weight. |
+| `costWeight` | `0.1` | Cost penalty weight in the routing score (0..1, clamped server-side). |
+| `latencyWeight` | `0.05` | Relative latency penalty weight (0..1, clamped server-side). |
 | `maxInputCost` | `0` | Input cost cap (USD / 1M tokens) when the whitelist is empty (or always, in blacklist mode). `0` = free models only. |
 | `maxOutputCost` | `0` | Output cost cap (USD / 1M tokens). |
 | `debug` | `false` | Log routing decisions to the server log. |
@@ -418,11 +436,16 @@ than guessing.
 ### Cross-provider routing
 
 With `crossProvider: true`, candidates include every connected provider and the
-whitelist uses full `provider/model-id` references (e.g.
+model list uses full `provider/model-id` references (e.g.
 `openrouter/z-ai/glm-4.6`). If the routed model turns out to be unavailable, that
 step fails **without retry**; success-rate learning therefore pushes flaky models
 down over time. Model comparison and rescue still work per real provider
 (`fusion/stat/<provider>/<model>`).
+
+For ordered fallback instead of mixing, use a **provider chain** (v1.2):
+`/fusion-provider` with two or more entries (e.g. `opencode-go, opencode,
+openrouter`) keeps candidates on the first healthy provider and falls through to
+the next when one is exhausted. A chain turns `crossProvider` off.
 
 ---
 
@@ -441,8 +464,13 @@ down over time. Model comparison and rescue still work per real provider
    recorded on each message, so **past turns are computed retroactively**.
 4. `[Generate summary]` produces a three-line summary (Instruction / Work / Outcome)
    from both the request and the response.
-5. Rate the response `1–5`. The rating is recorded for the selected turn's model;
-   ratings of 3 are neutral, 4+ add score, 2− subtract.
+5. Rate the response `1–5`. **One review per turn (v1.2)**: a turn that has
+   already been rated shows its rating instead of the buttons, and re-rating is
+   rejected server-side (the marker is cleared by `/fusion-reset`). The rating
+   is recorded for the selected turn's model; ratings of 3 are neutral, 4+ add
+   score, 2− subtract.
+6. Rate the topology cost-performance `1–5` (second row) — recorded against
+   **this turn's** topology (per-turn metadata since v1.2).
 
 Ratings are stored globally and per category (`fusion/feedback/...`). The routing
 score blends observations (65%) and human ratings (35%).
@@ -515,7 +543,9 @@ Turn: in 203 → out 513 tok
 - Provider-level quota cooldowns apply **only to free models**; paid models of the same
   provider remain eligible as rescue targets.
 - Rescue may widen candidates to budget-conforming paid models (always across
-  providers when `crossProvider` is on) so a dead free pool never stops replies.
+  providers when `crossProvider` is on, or when a **provider chain** entry is
+  exhausted — the next chain entry takes over, and blacklisted models stay
+  excluded everywhere) so a dead free pool never stops replies.
 - Only **rescue-driven** model switches are persisted on the session; ordinary
   score-based routing rewrites per dispatch to keep caches warm.
 
@@ -547,7 +577,10 @@ Turn: in 203 → out 513 tok
 - TUI commands mutate settings through RPC; the server re-reads persisted config on
   the `prompt` hook (logged as `CONFIG synced from storage`), so a toggle takes effect
   on the next prompt without a restart.
-- `/fusion-reset` clears statistics, cooldowns, rescue state and human/auto reviews.
+- `/fusion-reset` clears statistics, cooldowns, rescue state, variant outcome
+  records, review rated-turn markers and human/auto reviews (configuration,
+  benchmark snapshots and saved review assignments are kept; turns become
+  rateable again after a reset).
 
 ---
 
