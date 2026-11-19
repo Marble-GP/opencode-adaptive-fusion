@@ -251,6 +251,8 @@ type FusionConfig = {
   crossProvider?: boolean
   // v1.1.1: priority-ordered provider fallback chain (empty = single-provider mode)
   providerChain?: string[]
+  // v1.2.1: auto-promote sessions to the highest healthy chain entry
+  chainPromote?: boolean
   exploreRate?: number
   learningRate?: number
   minObservations?: number
@@ -300,7 +302,7 @@ type FusionConfig = {
 const formatConfig = (c: FusionConfig, en = false): string => {
   const T = (ja: string, eng: string) => (en ? eng : ja)
   const lines = [
-    `provider      : ${c.providerID ?? "-"}${(c.providerChain ?? []).length > 0 ? T(` (chain: ${(c.providerChain ?? []).join(" -> ")})`, ` (chain: ${(c.providerChain ?? []).join(" -> ")})`) : c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : ""}`,
+    `provider      : ${c.providerID ?? "-"}${(c.providerChain ?? []).length > 0 ? T(` (chain: ${(c.providerChain ?? []).join(" -> ")}${c.chainPromote === false ? " / 昇格OFF" : ""})`, ` (chain: ${(c.providerChain ?? []).join(" -> ")}${c.chainPromote === false ? " / promote off" : ""})`) : c.crossProvider ? T(" (cross: 全プロバイダー混合)", " (cross: all providers mixed)") : ""}`,
     `routing       : ${c.enabled ? "ON" : "OFF"}`,
     `lang          : ${c.lang ?? "-"}`,
     `exploreRate   : ${c.exploreRate ?? "-"} (learning ${c.learningRate ?? "-"} / minObs ${c.minObservations ?? "-"})`,

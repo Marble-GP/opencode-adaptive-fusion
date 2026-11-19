@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] — v1.2.1 (in development)
+
+### Added
+- **Chain promotion (`chainPromote`, default ON)**: with routing ON and a
+  provider chain set, a session whose current provider sits at a lower chain
+  priority than the highest healthy chain entry is switched to that entry
+  **once per prompt** (not per dispatch — no provider ping-pong, caches stay
+  warm). The target model is the best-scoring candidate within the entry
+  (score/warmup logic, no exploration); the switch records a restore ticket
+  so a later demotion can climb back the same way. This fixes the "free
+  models keep winning despite `opencode-go` being chain[0]" confusion:
+  previously only *rescue* moved sessions across chain entries — a healthy
+  session on `opencode`'s free tier never climbed back to the subscription
+  tier, because ordinary score routing never rewrites across providers.
+  Sessions on providers **outside** the chain are left alone (an explicit
+  user choice is respected). Route log: `PROMOTE <ref> -> <ref>
+  (chain[i] X > chain[j] Y, score=...)`. Disable with the `chainPromote`
+  option (`false`).
+
 ## [1.2.0] - 2026-11-18
 
 ### Fixed

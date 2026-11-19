@@ -202,6 +202,13 @@ type FusionConfig = {
   // once it recovers (existing rescue-restore, 24 h window). The primary
   // (chain[0]) is mirrored into providerID for display and legacy fallback.
   providerChain: string[]
+  // v1.2.1: chain promotion. When routing is ON, a session whose current
+  // provider sits at a LOWER chain priority than the highest healthy chain
+  // entry is switched to that entry once per prompt (not per dispatch — no
+  // provider ping-pong). The switch records a restore ticket, so a later
+  // demotion (e.g. after rescue fell through to a lower entry) climbs back
+  // the same way. OFF = only rescue moves sessions across chain entries.
+  chainPromote: boolean
   exploreRate: number
   learningRate: number
   minObservations: number
@@ -375,8 +382,10 @@ export default Plugin.define({
           : "opencode",
       crossProvider: ctx.options.crossProvider === true,
       // v1.1.1: provider chain (priority-ordered fallback). Set via
-      // /fusion-chain; providerID mirrors chain[0] when set.
+      // /fusion-provider; providerID mirrors chain[0] when set.
       providerChain: sanitizeProviderChain(ctx.options.providerChain),
+      // v1.2.1: chain promotion (auto-assign to the highest healthy entry)
+      chainPromote: ctx.options.chainPromote !== false,
       // v1.1.1: whitelist / blacklist interpretation of the model list
       listMode: ctx.options.listMode === "blacklist" ? "blacklist" : "whitelist",
       exploreRate: clamp(num(ctx.options.exploreRate, 0.05), 0, 1),
@@ -508,6 +517,7 @@ export default Plugin.define({
       // v1.1.1: provider chain restore
       if (Array.isArray(s.providerChain))
         cfg.providerChain = sanitizeProviderChain(s.providerChain)
+      if (typeof s.chainPromote === "boolean") cfg.chainPromote = s.chainPromote
       // v1.1.1: a restored chain wins over crossProvider (the routing
       // path prefers the chain; keep the flags mutually exclusive).
       if (cfg.providerChain.length > 0) cfg.crossProvider = false
@@ -3602,6 +3612,131 @@ export default Plugin.define({
       }
     }
 
+    // v1.2.1: best-score pick inside a pre-narrowed pool (chain promotion).
+    // Same scoring as pick()'s non-rescue path but restricted to `pool` —
+    // no exploration (a promotion is an ordered move, not a random trial).
+    const pickBestInPool = async (
+      pool: any[],
+      category?: string,
+    ): Promise<{ providerID: string; id: string; reason: string } | undefined> => {
+      const maxCost = Math.max(...pool.map((m) => routingCostOf(m))) || 1
+      const benchmarks = currentBenchmarks()
+      const benchK = benchmarkPriorK(benchmarks)
+      let best: { ref: string; providerID: string; id: string; score: number } | undefined
+      for (const model of pool) {
+        const ref = refFor(model.providerID, model.id)
+        if (cool(ref)) continue
+        const benchmark = benchmarkFor(benchmarks, ref, category)
+        const global = await loadStat(model.providerID, model.id)
+        const n = global ? global.success + global.failure : 0
+        const feedback = await loadFeedback(model.providerID, model.id)
+        const auto = await loadAutoReview(model.providerID, model.id)
+        const stat =
+          global && n > 0
+            ? global
+            : // unobserved: neutral machine score blended with the benchmark prior
+              ({
+                success: 0,
+                failure: 0,
+                totalMs: 0,
+              } as Stat)
+        const score = statScore(
+          stat,
+          feedback,
+          routingCostOf(model) / maxCost,
+          benchmark,
+          benchK,
+          auto,
+        )
+        if (!best || score > best.score)
+          best = { ref, providerID: model.providerID, id: model.id, score }
+      }
+      return best
+        ? {
+            providerID: best.providerID,
+            id: best.id,
+            reason: `score=${best.score.toFixed(3)}`,
+          }
+        : undefined
+    }
+
+    // v1.2.1: chain promotion. When routing is ON and chainPromote is set, a
+    // session whose current provider sits at a LOWER chain priority than the
+    // highest healthy chain entry is switched to that entry once, at prompt
+    // time (not per dispatch — a per-dispatch rewrite would ping-pong
+    // providers and break caches). Candidate selection within the target
+    // entry reuses pick() with rescue=false so the usual score/warmup logic
+    // picks the model; the switch records a restore ticket only when moving
+    // DOWN was possible (i.e. the current model's provider is itself a chain
+    // entry — otherwise there is nothing to restore back to).
+    // Returns whether the session model was switched.
+    const promoteSessionChain = async (
+      sessionID: string,
+      category?: string,
+    ): Promise<boolean> => {
+      if (!cfg.enabled || !cfg.chainPromote) return false
+      if (cfg.providerChain.length < 2) return false
+      try {
+        const session: any = await ctx.session.get({ sessionID })
+        let model = session?.model
+        if (!model?.providerID || !model?.id) {
+          const hint = lastResolved.get(sessionID)
+          if (hint?.providerID && hint?.id) model = hint
+        }
+        if (!model?.providerID || !model?.id) return false
+        const currentProvider = model.providerID
+        const currentRef = refFor(model.providerID, model.id)
+        const currentIdx = cfg.providerChain.indexOf(currentProvider)
+        // Sessions on providers outside the chain are left alone (the chain
+        // governs fallback order between its own entries; a user's explicit
+        // non-chain provider choice is respected).
+        if (currentIdx <= 0) return false
+        // The resolve hook's normal routing handles same-provider swaps; the
+        // promotion only moves the session UP the chain.
+        const models = await candidates()
+        const chainIdx = firstHealthyChainIndex(
+          models,
+          cfg.providerChain,
+          (m) => !cool(refFor(m.providerID, m.id)),
+        )
+        // Nothing above the current entry is healthy (or the current entry
+        // is already the highest healthy one).
+        if (chainIdx < 0 || chainIdx >= currentIdx) return false
+        const pid = cfg.providerChain[chainIdx]
+        const pool = models.filter((m: any) => m.providerID === pid)
+        // Pick the best model within the target entry (score/warmup logic,
+        // excluding the current model like a rescue would — the goal is a
+        // different provider).
+        let chosen: { providerID: string; id: string; reason: string } | undefined
+        const subset = pool.filter(
+          (m: any) => refFor(m.providerID, m.id) !== currentRef,
+        )
+        if (subset.length === 0) return false
+        // Simple best-score pick within the entry (reuses statScore via pick
+        // is provider-scoped to the whole pool; here we narrow manually).
+        chosen = await pickBestInPool(subset, category)
+        if (!chosen) return false
+        await ctx.session.switchModel({
+          sessionID,
+          model: { providerID: chosen.providerID, id: chosen.id },
+        })
+        // Record the restore ticket: if the higher entry later dies, rescue
+        // restore can bring the session back to the previous entry.
+        rescueAttempts.set(sessionID, {
+          originalRef: currentRef,
+          deadline: Date.now() + RESCUE_WINDOW_MS,
+        })
+        void persistRescue()
+        logRoute(
+          `PROMOTE ${sessionID} ${currentRef} -> ${chosen.providerID}/${chosen.id} (chain[${chainIdx}] ${pid} > chain[${currentIdx}] ${currentProvider}, ${chosen.reason})`,
+        )
+        return true
+      } catch (error) {
+        logRoute(`PROMOTE error: ${String(error).slice(0, 80)}`)
+        return false
+      }
+    }
+
     // Consolidate admission-time handling into a single hook (v0.8 audit fix):
     // 1) classify (category/topology/load band) -> 2) pre-rescue.
     // Splitting them makes execution order across hooks depend on the runtime implementation,
@@ -3630,6 +3765,20 @@ export default Plugin.define({
       } catch (error) {
         // Classification failure does not block normal processing (continue unclassified)
         logRoute(`CLASSIFY error: ${String(error).slice(0, 80)}`)
+      }
+      // v1.2.1: chain promotion first — a healthy higher chain entry takes
+      // the session before (and instead of) rescue checks: if the current
+      // model is cooling, the pre-prompt rescue below would handle it with
+      // the chain priority anyway; if it is healthy, the promotion moves the
+      // session up the chain as configured.
+      try {
+        if (await promoteSessionChain(
+          event.sessionID,
+          sessionCategory.get(event.sessionID) ?? undefined,
+        ))
+          return // promoted this prompt; skip the rescue pass
+      } catch {
+        // Promotion failure does not block normal processing
       }
       try {
         await switchSessionIfCooling(
@@ -5824,6 +5973,9 @@ export default Plugin.define({
           cfg.crossProvider = false
         }
       }
+      // v1.2.1: chain promotion toggle
+      if (typeof update.chainPromote === "boolean")
+        cfg.chainPromote = update.chainPromote
       if (typeof update.exploreRate === "number") cfg.exploreRate = clamp(update.exploreRate, 0, 1)
       if (typeof update.learningRate === "number") cfg.learningRate = clamp(update.learningRate, 0, 1)
       if (typeof update.minObservations === "number") cfg.minObservations = Math.max(1, Math.floor(update.minObservations))

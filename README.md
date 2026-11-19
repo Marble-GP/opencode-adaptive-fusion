@@ -268,7 +268,7 @@ defaults only.
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
-| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window). | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off). A whitelist is reset with it (model ids depend on the provider); **blacklist entries are kept** — they are deliberate exclusions that stay valid across providers. |
+| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. **Chain promotion (default ON)**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (`PROMOTE` in the route log; disable with the `chainPromote` option). Sessions moved by fallback or promotion can return to a higher entry the same way once it recovers. | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off). A whitelist is reset with it (model ids depend on the provider); **blacklist entries are kept** — they are deliberate exclusions that stay valid across providers. |
 | `/fusion-modellist` | Edits the routing model list with a **stack editor**: `➕ add a model` stacks a typed entry (`provider/model-id` recommended, Enter to add), entries are **grouped by provider**, and each entry can be removed or edited from its entry menu. A `⇄ mode` toggle switches between **whitelist** (only listed models are candidates; empty = all candidates + cost caps) and **blacklist** (every candidate **except** the listed ones, within the cost caps — handy for excluding just a few bad models; a bare `model-id` entry excludes that model on every provider). Toggling the mode clears the list (the meaning inverts, so stale entries are dangerous). | `models`, `listMode` — the same `models` field holds the entries in both modes. |
 
 ### Score tuning
@@ -321,6 +321,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | --- | --- | --- |
 | `providerID` | `"opencode"` | Routing target provider. Use `"openrouter"` for OpenRouter-only setups. Changeable at runtime. |
 | `providerChain` | `[]` | Priority-ordered provider fallback chain (e.g. `["opencode-go","opencode","openrouter"]`). Empty = single-provider routing via `providerID`. Candidates come from the first entry with healthy models; exhausted entries (quota / account-wide free-tier cooldown) fall through to the next. Set with the `/fusion-provider` stack editor. |
+| `chainPromote` | `true` | **Chain promotion**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (once per prompt — no per-dispatch ping-pong). Without it, only rescue moves sessions across chain entries. |
 | `crossProvider` | `false` | Mix all connected providers when routing. Whitelist then uses full `provider/model-id` references. |
 | `listMode` | `"whitelist"` | How the `models` list is interpreted: `whitelist` = only listed models are candidates (empty = all candidates + cost caps). `blacklist` = every candidate **except** the listed ones — the cost caps always apply, and a blacklisted model stays excluded even during rescue's emergency expansion. Toggle with `/fusion-modellist`. |
 | `models` | `[]` | The routing model list (`listMode` decides the meaning). Entries match the full `provider/model-id` form and the bare `model-id` form (a bare id matches within any allowed provider, and excludes that model on every provider in blacklist mode); the `:free` suffix is normalized, so `openrouter/z-ai/glm-4.6` matches `…glm-4.6:free` too. |
@@ -445,7 +446,12 @@ down over time. Model comparison and rescue still work per real provider
 For ordered fallback instead of mixing, use a **provider chain** (v1.2):
 `/fusion-provider` with two or more entries (e.g. `opencode-go, opencode,
 openrouter`) keeps candidates on the first healthy provider and falls through to
-the next when one is exhausted. A chain turns `crossProvider` off.
+the next when one is exhausted. A chain turns `crossProvider` off. **Chain
+promotion** (default on): with routing ON, a session parked on a lower chain
+entry (e.g. `opencode` free tier after the subscription tier died) is switched
+back to the highest healthy entry automatically at the next prompt — logged as
+`PROMOTE ...` — so a temporary fallback does not strand the session on the
+free tier after the primary recovers.
 
 ---
 
