@@ -151,9 +151,9 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightJev",
     min: 0,
     max: 1,
-    sja: "トポロジー: Jev事前",
+    sja: "ワークフロー: Jev事前",
     sen: "topology: Jev prior weight",
-    ja: "トポロジー選択での Jev 事前確率の重み",
+    ja: "ワークフロー選択での Jev 事前確率の重み",
     en: "weight of the Jev prior in topology selection",
   },
   {
@@ -161,9 +161,9 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightHumanCP",
     min: 0,
     max: 1,
-    sja: "トポロジー: 人間コスパ",
+    sja: "ワークフロー: 人間コスパ",
     sen: "topology: human cost-perf",
-    ja: "トポロジー選択での人間コスパ評価の重み",
+    ja: "ワークフロー選択での人間コスパ評価の重み",
     en: "weight of human cost-performance ratings in topology selection",
   },
   {
@@ -171,9 +171,9 @@ const WEIGHT_FIELDS: {
     server: "topologyWeightAuto",
     min: 0,
     max: 1,
-    sja: "トポロジー: 自動観測",
+    sja: "ワークフロー: 自動観測",
     sen: "topology: auto observations",
-    ja: "トポロジー選択での自動観測(品質/ok率)の重み",
+    ja: "ワークフロー選択での自動観測(品質/ok率)の重み",
     en: "weight of automatic observations (quality/ok-rate) in topology selection",
   },
   {
@@ -192,9 +192,9 @@ const WEIGHT_FIELDS: {
     server: "topologyExploreRate",
     min: 0,
     max: 1,
-    sja: "トポロジー: 探索率(ε)",
+    sja: "ワークフロー: 探索率(ε)",
     sen: "topology: exploration rate",
-    ja: "トポロジー選択の ε-greedy 探索確率(0..1)。0 で貪欲選択のみ",
+    ja: "ワークフロー選択の ε-greedy 探索確率(0..1)。0 で貪欲選択のみ",
     en: "ε-greedy exploration probability for topology selection (0..1). 0 = greedy only",
   },
   {
@@ -203,9 +203,9 @@ const WEIGHT_FIELDS: {
     min: 1,
     max: 20,
     integer: true,
-    sja: "トポロジー: ベイズ事前の強さ",
+    sja: "ワークフロー: ベイズ事前の強さ",
     sen: "topology: Bayesian prior strength",
-    ja: "トポロジー選択におけるベイズ事前の疑似観測数(1..20)。大きいほど事前分布に強く引っ張られる",
+    ja: "ワークフロー選択におけるベイズ事前の疑似観測数(1..20)。大きいほど事前分布に強く引っ張られる",
     en: "pseudocount (1..20) of the Bayesian prior in topology selection; higher anchors more strongly to the prior",
   },
   {
@@ -310,9 +310,9 @@ const formatConfig = (c: FusionConfig, en = false): string => {
     `autoReview    : ${c.autoReviewWeight ?? "-"} (v1.0: audit weight inside the quality term, 0 = shadow only)`,
     `classifier    : ${c.classifierModel ?? T("(分類なし)", "(none)")}`,
     `reviewModel   : ${c.reviewModel ?? T("(classifierModel と同じ経路 / 共有フォールバック)", "(same path as classifierModel / shared fallback)")}`,
-    `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・トポロジー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
-    `topology      : ${c.topologyMode === "fixed" ? T("fixed / single 固定", "fixed / always single") : T(`auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`, `auto / ${(c.allowedTopologies ?? []).join(", ")} / aux call limit ${c.maxTopologyCalls ?? 4}`)}`,
-    `topo weights  : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
+    `jev           : ${c.jevMode === "off" ? "OFF (jevMode=off)" : c.jevAvailable ? T("利用可能 (分類・ワークフロー判定を Jev で実行)", "available (classification and topology run on Jev)") : T("キー未登録 — 従来経路で動作", "no key — using the legacy path")}`,
+    `workflow     : ${c.topologyMode === "fixed" ? T("fixed / single 固定", "fixed / always single") : T(`auto / ${(c.allowedTopologies ?? []).join(", ")} / 補助呼出上限 ${c.maxTopologyCalls ?? 4}`, `auto / ${(c.allowedTopologies ?? []).join(", ")} / aux call limit ${c.maxTopologyCalls ?? 4}`)}`,
+    `wf weights   : ${T("jev事前", "jev prior")} ${c.topologyWeightJev ?? "-"} / ${T("コスパ", "cost-perf")} ${c.topologyWeightHumanCP ?? "-"} / ${T("自動観測", "auto")} ${c.topologyWeightAuto ?? "-"} / ${T("探索ε", "explore ε")} ${c.topologyExploreRate ?? "-"} / ${T("事前", "prior")} ${c.topologyPriorStrength ?? "-"} / ${T("レスキュー試行", "rescue attempts")} ${c.rescueAttemptsBeforeSwitch ?? "-"}`,
     `chain         : ${c.chainMode === "active" ? T("active (chain選択時にplanner計画をsystem注入)", "active (injects a planner plan as system context on chain turns)") : T("off (判定と記録のみ / /fusion-chainmode で切替)", "off (decide and record only / toggle with /fusion-chainmode)")}`,
     `tiers         : ${c.tierMode === "manual" ? "manual" : c.tierMode === "auto" ? T("auto (ベンチマークから3分割)", "auto (split from benchmarks)") : T("off (/fusion-tiermode で切替)", "off (toggle with /fusion-tiermode)")}`,
     `variant       : ${c.variantMode === "fixed" ? T(`fixed (#${c.variantFixed ?? "-"} / モデルに無い場合はスキップ / ε ${c.variantExploreRate ?? "-"})`, `fixed (#${c.variantFixed ?? "-"} / skipped when the model lacks it / ε ${c.variantExploreRate ?? "-"})`) : c.variantMode === "off" ? T(`off (effort/thinking は変更しない / ε ${c.variantExploreRate ?? "-"})`, `off (never touch effort/thinking / ε ${c.variantExploreRate ?? "-"})`) : T(`auto (Jev/LLMヒント+重量クラス補正+探索ε ${c.variantExploreRate ?? "-"}+観測学習 / 明示指定は優先)`, `auto (Jev/LLM hint + weight-class compensation + explore ε ${c.variantExploreRate ?? "-"} + outcome learning; explicit choice wins)`)}`,
@@ -631,7 +631,7 @@ export default Plugin.define({
         } catch (error) {
           setMessage(
             tr(
-              `トポロジーコスパ評価失敗: ${errorText(error)}`,
+              `ワークフローコスパ評価失敗: ${errorText(error)}`,
               `Topology cost-performance rating failed: ${errorText(error)}`,
             ),
           )
@@ -693,7 +693,7 @@ export default Plugin.define({
               ? `${info()!.feedbackAverage.toFixed(1)}/5 (${info()!.feedbackCount}${tr("件", " entries")})`
               : tr("まだ評価なし", "no ratings yet")}
             {"  "}
-            {tr("トポロジー", "Topology")}: {info()?.topology ?? "single"}
+            {tr("ワークフロー", "Workflow")}: {info()?.topology ?? "single"}
             {info() && (info()!.topologyCount ?? 0) > 0
               ? tr(
                   ` (${info()!.topologyCount}回 / ok ${Math.round((info()!.topologyOkRate ?? 0) * 100)}% / ${((info()!.topologyAvgMs ?? 0) / 1000).toFixed(1)}s`,
@@ -771,7 +771,7 @@ export default Plugin.define({
                 <text key={n} fg={context.theme.text.base} onMouseDown={() => void rate(n)}>[{n}]</text>
               ))}
           </box>
-          <text fg={context.theme.text.base}>{tr("トポロジーコスパ評価(1〜5)", "Topology cost-performance rating (1-5)")}</text>
+          <text fg={context.theme.text.base}>{tr("ワークフローコスパ評価(1〜5)", "Workflow cost-performance rating (1-5)")}</text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             {info()?.rated?.topologyRating !== undefined
               ? <text fg={context.theme.textMuted?.base ?? context.theme.text.base}>{tr(`評価済み: ${info()!.rated!.topologyRating}/5`, `rated: ${info()!.rated!.topologyRating}/5`)}</text>
@@ -1285,7 +1285,7 @@ export default Plugin.define({
         {
           id: "fusion.params",
           title: tr(
-            "adaptive-fusion: ルーティング/トポロジーの重み係数を一括調整",
+            "adaptive-fusion: ルーティング/ワークフローの重み係数を一括調整",
             "adaptive-fusion: batch-adjust routing/topology weights",
           ),
           slash: { name: "fusion-params" },
@@ -1646,6 +1646,14 @@ export default Plugin.define({
           run: () => fusionModelListDialog(),
         },
         {
+          // v1.2.2 (audit, config #11): back-compat alias for the renamed
+          // /fusion-whitelist command.
+          id: "fusion.modellist.alias",
+          title: "adaptive-fusion: /fusion-modellist (alias of the old /fusion-whitelist)",
+          slash: { name: "fusion-whitelist" },
+          run: () => fusionModelListDialog(),
+        },
+        {
           id: "fusion.provider",
           title: tr("adaptive-fusion: ルーティング対象プロバイダーを変更(優先順付きチェーン可)", "adaptive-fusion: change the routing target provider (priority chain supported)"),
           slash: { name: "fusion-provider" },
@@ -1662,6 +1670,9 @@ export default Plugin.define({
               // Working stack: add (type + Enter) appends; entries can be
               // swapped up/down, edited, or removed one by one.
               let chain: string[] = [...seed]
+              // v1.2.2: chain promotion toggle state (saved with the chain)
+              let promote = current.config.chainPromote !== false
+              let promoteTouched = false
               // Reopen the list with this entry highlighted after an action
               let focusIndex = -1
 
@@ -1769,6 +1780,20 @@ export default Plugin.define({
                       ),
                     },
                     {
+                      // v1.2.2 (audit, config #12): interactive toggle for
+                      // chain promotion (previously RPC/config only).
+                      title: tr(
+                        `⇄ 昇格プロモーション: ${promote ? "ON" : "OFF"}`,
+                        `⇄ chain promotion: ${promote ? "ON" : "OFF"}`,
+                      ),
+                      value: "promote",
+                      category: tr("操作", "actions"),
+                      description: tr(
+                        "ONなら、下位チェーンにいるセッションを次のプロンプトで最上位の健全エントリへ自動昇格",
+                        "ON auto-promotes sessions on lower entries to the highest healthy entry at the next prompt",
+                      ),
+                    },
+                    {
                       title: tr("✔ 完了(保存して終了)", "✔ done (save and finish)"),
                       value: "done",
                       category: tr("操作", "actions"),
@@ -1782,6 +1807,11 @@ export default Plugin.define({
                 if (!picked || picked === "done") break
                 if (picked === "add") {
                   await addProvider()
+                  continue
+                }
+                if (picked === "promote") {
+                  promote = !promote
+                  promoteTouched = true
                   continue
                 }
                 // Entry menu: swap up/down, edit, remove
@@ -1870,7 +1900,7 @@ export default Plugin.define({
 
               // Esc / done: persist only when the stack actually changed.
               const unchanged =
-                JSON.stringify(chain) === JSON.stringify(seed)
+                JSON.stringify(chain) === JSON.stringify(seed) && !promoteTouched
               if (unchanged) return
               // v1.1.1: clearing the model list is necessary for whitelist
               // entries (a stale whitelist from the old provider would block
@@ -1879,21 +1909,23 @@ export default Plugin.define({
               const listMode = current.config.listMode ?? "whitelist"
               const resetList =
                 listMode === "whitelist" ? { models: [] } : {}
+              // v1.2.2: include the promotion toggle when it was touched
+              const promoteUpdate = promoteTouched ? { chainPromote: promote } : {}
               const result =
                 chain.length >= 2
                   ? await fusion.config(
-                      { update: { providerChain: chain, ...resetList } },
+                      { update: { providerChain: chain, ...resetList, ...promoteUpdate } },
                       { location: location() },
                     )
                   : chain.length === 1
                     ? await fusion.config(
                         // Single entry left = plain single-provider mode
-                        { update: { providerID: chain[0], ...resetList } },
+                        { update: { providerID: chain[0], ...resetList, ...promoteUpdate } },
                         { location: location() },
                       )
                     : await fusion.config(
                         // Empty stack = clear the chain (single provider stays)
-                        { update: { providerChain: [], ...resetList } },
+                        { update: { providerChain: [], ...resetList, ...promoteUpdate } },
                         { location: location() },
                       )
               const c = result.config

@@ -613,6 +613,73 @@ check("whitelist: suffix-less entry matches free model", listAllows("whitelist",
 check("blacklist: suffix-less entry excludes free model", listAllows("blacklist", ["openrouter/z-ai/glm-4.6"], "openrouter", "z-ai/glm-4.6:free"), false);
 check("hyphen-free model name is not the :free suffix", listAllows("whitelist", ["opencode/iceman"], "opencode", "iceman-free"), false);
 
+// --- Emergency expansion provider scope (mirror of candidates()' expand branch, v1.2.2) ---
+// Even on rescue (emergency), candidates never leak outside the chain /
+// crossProvider / single-provider scope; blacklist exclusions stay excluded.
+const emergencyAllows = (
+  m,
+  { chain = [], crossProvider = false, providerID = "opencode-go", listMode = "whitelist", list = [], costOK = () => true },
+) => {
+  const norm = (ref) => ref.replace(/:free$/, "");
+  const full = `${m.providerID}/${m.modelID}`;
+  const has =
+    list.includes(full) || list.includes(norm(full)) ||
+    list.includes(m.modelID) || list.includes(norm(m.modelID));
+  const inScope = chain.length > 0
+    ? chain.includes(m.providerID)
+    : crossProvider || m.providerID === providerID;
+  const excluded = listMode === "blacklist" && has;
+  return (
+    inScope &&
+    !excluded &&
+    (listMode === "blacklist" || list.length === 0 || has || costOK(m))
+  );
+};
+check("emergency: single-provider scope keeps foreign providers out",
+  emergencyAllows({ providerID: "openrouter", modelID: "z-ai/glm-5.3" }, {}), false);
+check("emergency: single-provider scope keeps its own models in",
+  emergencyAllows({ providerID: "opencode-go", modelID: "glm-5.3" }, {}), true);
+check("emergency: chain scope keeps non-chain providers out",
+  emergencyAllows({ providerID: "openrouter", modelID: "z-ai/glm-5.3" }, { chain: ["opencode-go", "opencode"] }), false);
+check("emergency: chain scope keeps chain providers in",
+  emergencyAllows({ providerID: "opencode", modelID: "glm-5.3-flash-free" }, { chain: ["opencode-go", "opencode"] }), true);
+check("emergency: crossProvider allows every provider",
+  emergencyAllows({ providerID: "openrouter", modelID: "z-ai/glm-5.3" }, { crossProvider: true }), true);
+check("emergency: blacklist exclusion survives emergency expansion",
+  emergencyAllows({ providerID: "opencode-go", modelID: "glm-5.3" }, { listMode: "blacklist", list: ["glm-5.3"] }), false);
+check("emergency: emergency expansion beyond a whitelist within scope",
+  emergencyAllows({ providerID: "opencode-go", modelID: "kimi-k3.1-pro" }, { list: ["opencode-go/glm-5.3"], costOK: () => true }), true);
+check("emergency: emergency expansion respects budget (costOK false)",
+  emergencyAllows({ providerID: "opencode-go", modelID: "kimi-k3.1-pro" }, { list: ["opencode-go/glm-5.3"], costOK: () => false }), false);
+
+// --- Model-list reset is listMode-aware (mirror of applyConfigUpdate, v1.2.2) ---
+// Provider/crossProvider/chain transitions drop WHITELIST entries only;
+// blacklist exclusions are deliberate and survive.
+const modelsAfterProviderChange = (cfg, update) => {
+  const next = { ...cfg };
+  if (typeof update.providerID === "string" && update.providerID.length > 0) {
+    if (update.providerID !== next.providerID && !("models" in update) && next.listMode === "whitelist")
+      next.models = [];
+    next.providerID = update.providerID;
+  }
+  return next.models;
+};
+check("provider change clears a whitelist", modelsAfterProviderChange({ providerID: "opencode-go", listMode: "whitelist", models: ["glm-5.3"] }, { providerID: "opencode" }).join("|"), "");
+check("provider change keeps a blacklist", modelsAfterProviderChange({ providerID: "opencode-go", listMode: "blacklist", models: ["hy4-flash-free"] }, { providerID: "opencode" }).join("|"), "hy4-flash-free");
+check("same provider keeps the whitelist", modelsAfterProviderChange({ providerID: "opencode-go", listMode: "whitelist", models: ["glm-5.3"] }, { providerID: "opencode-go" }).join("|"), "glm-5.3");
+
+// --- Review offset must not inherit current session values (mirror, v1.2.2) ---
+// Older, never-reviewed turns (offset > 0, no meta) show the conservative
+// default instead of the session's CURRENT workflow/category.
+const reviewTurnValues = (meta, offset, sessionTopo, sessionCategory) => ({
+  topology: meta?.topology ?? (offset === 0 ? sessionTopo : "single"),
+  category: meta?.category ?? (offset === 0 ? sessionCategory : undefined) ?? "",
+});
+check("latest turn inherits the session workflow", reviewTurnValues(undefined, 0, "sequential-chain", "research").topology, "sequential-chain");
+check("older turn without meta falls back to single", reviewTurnValues(undefined, 2, "sequential-chain", "research").topology, "single");
+check("older turn without meta has no category", reviewTurnValues(undefined, 2, "sequential-chain", "research").category, "");
+check("older turn with meta uses it", reviewTurnValues({ topology: "router", category: "coding" }, 2, "sequential-chain", "research").topology, "router");
+
 
 if (failures > 0) {
   console.log(`\nTOTAL: ${failures} FAILURE(S)`);

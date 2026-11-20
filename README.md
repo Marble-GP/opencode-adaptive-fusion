@@ -83,7 +83,7 @@ Install the plugin straight from this repository (the repository root is the
 plugin package; its `package.json` maps `exports` into `plugins/adaptive-fusion/`):
 
 ```bash
-opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.2.1'
+opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.2.2'
 ```
 
 OpenCode installs it into the **global** plugin configuration. Verify and manage it with:
@@ -94,7 +94,7 @@ opencode plugin update opencode-adaptive-fusion
 opencode plugin remove  opencode-adaptive-fusion
 ```
 
-Exact tags such as `v1.2.0` stay pinned to that tag; omit the `#…` suffix to track the
+Exact tags such as `v1.2.2` stay pinned to that tag; omit the `#…` suffix to track the
 default branch, and use `opencode plugin update` to jump forward. Restart OpenCode
 after installing (TUI parts load at startup).
 
@@ -223,7 +223,8 @@ you configure plus optional Jev calls.
 3. When enough observations exist, enable routing with `/fusion-toggle`.
 4. Review results with `/fusion-stats`, adjust candidates with `/fusion-modellist`,
    and rate responses with `/fusion-review`. The [slash command
-   reference](#commands) documents all 17 commands, their dialogs and what each
+   reference](#commands) documents all 17 commands (plus the
+   `/fusion-whitelist` back-compat alias), their dialogs and what each
    one persists.
 
 **Cost cap is zero by default.** When the whitelist is empty (or in blacklist mode), only models whose
@@ -268,7 +269,7 @@ defaults only.
 | Command | What it does | What it sets (persisted) |
 | --- | --- | --- |
 | `/fusion-toggle` | Flips routing ON/OFF and updates the footer indicator. **OFF stops every model switch** (routing, pre-prompt rescue, after-fail rescue, rescue-restore); passive learning (observation, classification, shadow review, cool-down/recovery probes) keeps running. | `enabled` |
-| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. **Chain promotion (default ON)**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (`PROMOTE` in the route log; disable with the `chainPromote` option). Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window); **promotion** does not create a restore ticket — it is a priority decision, so the session stays on the higher entry. | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off). A whitelist is reset with it (model ids depend on the provider); **blacklist entries are kept** — they are deliberate exclusions that stay valid across providers. |
+| `/fusion-provider` | Changes the routing target provider with a **stack editor**: `➕ add a provider` stacks a typed id (Enter to add), and each entry can be **swapped up/down** (priority), **edited**, or **removed** from its entry menu. One entry = plain single-provider routing; **two or more entries form a priority provider chain** — candidates always come from the first entry that still has healthy (non-cooling) models, and when that provider is exhausted (quota / account-wide free-tier cooldown) the next entry takes over. **Chain promotion (default ON)**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (`PROMOTE` in the route log; toggle with the `⇄ chain promotion` row in the `/fusion-provider` stack editor, or the `chainPromote` option). Sessions moved by chain fallback are restored to the original provider once it recovers (existing rescue-restore, 24 h window); **promotion** does not create a restore ticket — it is a priority decision, so the session stays on the higher entry. | `providerID` (single) or `providerChain` (multi; `providerID` mirrors `chain[0]`, `crossProvider` turns off). A whitelist is reset with it (model ids depend on the provider); **blacklist entries are kept** — they are deliberate exclusions that stay valid across providers. |
 | `/fusion-modellist` | Edits the routing model list with a **stack editor**: `➕ add a model` stacks a typed entry (`provider/model-id` recommended, Enter to add), entries are **grouped by provider**, and each entry can be removed or edited from its entry menu. A `⇄ mode` toggle switches between **whitelist** (only listed models are candidates; empty = all candidates + cost caps) and **blacklist** (every candidate **except** the listed ones, within the cost caps — handy for excluding just a few bad models; a bare `model-id` entry excludes that model on every provider). Toggling the mode clears the list (the meaning inverts, so stale entries are dangerous). | `models`, `listMode` — the same `models` field holds the entries in both modes. |
 
 ### Score tuning
@@ -321,7 +322,7 @@ settings. Precedence: **saved settings > `opencode.json` options**.
 | --- | --- | --- |
 | `providerID` | `"opencode"` | Routing target provider. Use `"openrouter"` for OpenRouter-only setups. Changeable at runtime. |
 | `providerChain` | `[]` | Priority-ordered provider fallback chain (e.g. `["opencode-go","opencode","openrouter"]`). Empty = single-provider routing via `providerID`. Candidates come from the first entry with healthy models; exhausted entries (quota / account-wide free-tier cooldown) fall through to the next. Set with the `/fusion-provider` stack editor. |
-| `chainPromote` | `true` | **Chain promotion**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (once per prompt — no per-dispatch ping-pong). Without it, only rescue moves sessions across chain entries. |
+| `chainPromote` | `true` | **Chain promotion**: with routing ON, a session on a lower chain entry is automatically switched to the highest healthy entry at the next prompt (once per prompt — no per-dispatch ping-pong). Without it, only rescue moves sessions across chain entries. Togglable from the `/fusion-provider` stack editor (v1.2.2). |
 | `crossProvider` | `false` | Mix all connected providers when routing. Whitelist then uses full `provider/model-id` references. |
 | `listMode` | `"whitelist"` | How the `models` list is interpreted: `whitelist` = only listed models are candidates (empty = all candidates + cost caps). `blacklist` = every candidate **except** the listed ones — the cost caps always apply, and a blacklisted model stays excluded even during rescue's emergency expansion. Toggle with `/fusion-modellist`. |
 | `models` | `[]` | The routing model list (`listMode` decides the meaning). Entries match the full `provider/model-id` form and the bare `model-id` form (a bare id matches within any allowed provider, and excludes that model on every provider in blacklist mode); the `:free` suffix is normalized, so `openrouter/z-ai/glm-4.6` matches `…glm-4.6:free` too. |
@@ -610,7 +611,7 @@ Planned multi-agent shapes are only comparable once implemented.
 | collaboration | Independent answers, judge consensus *(planned)* | N+1 |
 | graph | State-machine execution *(planned)* | dynamic |
 
-Topology selection (v1.1):
+Topology selection (v1.1; presented as **suggested workflow** since v1.2.2):
 
 1. **Task-shape prior + Jev blend**: a deterministic prior is computed from the
    load band (light/middle/heavy) and the task category
@@ -618,20 +619,34 @@ Topology selection (v1.1):
    single), multiplied per shape by `(0.5 + D-4 score)` when ≥ 3 observations
    exist for the category. When Jev answers (with a key), its probability
    distribution is blended in with weight `topologyWeightJev`
-   (`(1 - w) × prior + w × Jev`, default 0.5/0.5). Without a key the prior
-   stands alone.
+   (`(1 - w) × prior + w × Jev`, default 0.5/0.5). Jev answers with
+   confidence < 0.7 fall back to the prior alone (v1.2.2). Without a key the
+   prior stands alone.
 2. **Exploration (ε)**: with probability `topologyExploreRate` (default `0.1`),
    a random non-greedy allowed topology is adopted instead of the argmax, so
    non-`single` shapes can accumulate a track record. Set `0` to disable.
-3. **Greedy = argmax** of the blended distribution; sequential-chain is picked
-   only when `maxTopologyCalls >= 2`; `chainMode=active` still controls planner
-   injection.
+3. **Greedy = argmax** of the blended distribution (ties break in
+   distribution order, not toward `single`); sequential-chain is picked
+   only when `maxTopologyCalls >= 2`; `chainMode=active` still controls
+   planner injection.
+
+**Agent-visible suggestions (v1.2.2)**: the plugin cannot spawn or manage
+sub-agents itself (OpenCode plugin hooks rewrite models and inject context
+only), so a non-`single` selection makes the choice visible to the main
+agent instead of only recording it: `sequential-chain` + `chainMode=active`
+injects the planner plan (unchanged), and every other non-`single`
+selection (router, or sequential-chain with `chainMode=off`) pushes a
+short, non-binding **workflow suggestion** into the system context for that
+turn — how to decompose the task and when to consider delegating
+independent parts to sub-agents (`WORKFLOW hint ... injected` in the route
+log).
 
 Configuration of selection: `topologyMode` (`auto` / `fixed`), `allowedTopologies`,
 `topologyWeightJev` (w1, also the blend weight), `topologyWeightHumanCP` (w2),
 `topologyWeightAuto` (w3), and `topologyExploreRate` (ε). The persisted
 `fusion/topology/*` stats keep recording observations, priors, cost-performance
-ratings and auxiliary calls.
+ratings and auxiliary calls; observations are attributed to the shape that
+was selected for that turn (captured at request time, v1.2.2).
 
 `chainMode=active` enables sequential-chain planning injection: a planner call
 (8 s timeout) produces a 3–5 line plan that is pushed once into the system context

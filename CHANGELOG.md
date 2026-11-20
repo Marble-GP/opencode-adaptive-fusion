@@ -1,5 +1,115 @@
 # Changelog
 
+## [1.2.2] - 2026-11-20
+
+### Added
+- **Suggested workflow (topology rename + agent-visible hints)**: the
+  topology selection is now presented as a *suggested workflow*. Beyond the
+  existing planner-plan injection (sequential-chain + chainMode=active),
+  every non-single selection now injects a short, non-binding **workflow
+  suggestion** into the system context (`WORKFLOW hint ... injected` in the
+  route log) — including how to decompose the task and when to consider
+  delegating independent parts to sub-agents. The plugin still cannot spawn
+  sub-agents itself (OpenCode plugin hooks rewrite models and inject context
+  only), but the selection is finally visible to the main agent instead of
+  only being recorded in the stats. Display labels renamed
+  (トポロジー → ワークフロー); internal config keys are unchanged.
+- **`/fusion-provider` promotion toggle**: a `⇄ chain promotion` row in the
+  stack editor toggles `chainPromote` interactively (previously RPC/config
+  only).
+- **`/fusion-whitelist` alias** for `/fusion-modellist` (back-compat with
+  the pre-v1.1.1 command name).
+
+### Fixed — workflow/topology selection
+- **Neutral, criteria-first Jev prompt**: the old prompt let Jev default to
+  `single` for anything ambiguous (98%+ single in production, making the
+  feature effectively dead). The new prompt describes when each shape pays
+  off and explicitly forbids defaulting to `single` for multi-step tasks.
+- **Jev confidence gating enforced**: answers with confidence < 0.7 no
+  longer drive the blend (the documented fallback finally exists), and the
+  Jev block is exception-safe (a malformed-but-200 payload used to abort
+  classification; `confidence.toFixed` could throw).
+- **Observation attribution**: the turn's workflow shape/category is
+  captured at `http.request` time and threaded through the topology stats,
+  auto-review quality and per-turn review metadata — a later prompt (or an
+  auto-review completing after the next classify) no longer re-attributes
+  the observation to the newer turn's shape. Insertion-order refresh keeps
+  the 200-entry session map evicting genuinely old sessions.
+- Older never-reviewed turns no longer inherit the session's CURRENT
+  workflow/category (conservative default instead); turn metadata upserts
+  are awaited; assistant messages without an id get a stable synthetic key
+  (marker persistence and re-rating prevention used to be silently
+  disabled); review assignments are persisted awaited (race with an
+  immediate review).
+- Tie-breaking no longer secretly favors `single`; zero-weight score
+  display is neutral 0.5; zero Jev probabilities are not recorded as prior
+  samples; unknown `allowedTopologies` strings are filtered before the Jev
+  summary.
+
+### Fixed — rescue/routing robustness (audit)
+- **Emergency expansion is provider-scoped**: single-provider routing no
+  longer leaks rescue candidates to every connected provider (the chain /
+  crossProvider / single-provider scope now applies to the emergency branch
+  too; blacklists still survive).
+- **Rescue serialization unified**: the resolve hook's rescue switches now
+  claim (`tryClaimRescue`) and mark (`markRescueSwitch`) like every other
+  rescue site; `switchSessionIfCooling` honors the 15 s suppression window
+  (and marks its own switches, restore included); chain promotion marks its
+  switch and only clears a restore ticket that still points at the entry it
+  left; the prompt hook no longer early-returns after a promotion (the
+  suppression-guarded rescue pass still runs).
+- **Definitive failures rescue immediately** even inside the suppression
+  window when the session is still dispatched on the failed model; "model
+  not found / unknown model / does not exist" messages are definitive too.
+- **Quota double-marking deduped**: the event-first race (session.step.failed
+  before http.response) no longer marks the same failure twice (failure
+  count + cooldown extension were doubled); quota outcomes now feed the
+  per-variant bandit as well.
+- **Attempt counters reset per episode**: a successful observation clears
+  ALL of the session's attempt counters (a recovered model no longer trips
+  the gate on its next single failure).
+- Map bounds: `lastHttpFailure`/`lastEventFailure` evict oldest past 256
+  even inside the window; `pending` and `lastResolved` cap at 200.
+- `resolve` and `http.response` hooks are fully exception-safe (an
+  unexpected throw used to reject the hook and leave partial state).
+- Verification probes re-fetch the cooldown entry (a probe completing after
+  a clear/reset can no longer resurrect the dead cooldown); TDZ hazard on
+  `rescueTombstones`/`persistRescue` removed (declarations moved above
+  their first reference).
+- Chain-entry "observed" checks accept task-level stats (matching the
+  scoring precedence); candidate filter requires a usable cost tier
+  (undefined `cost[0]` poisoned maxCost/scores via Infinity).
+
+### Fixed — variant selection
+- `variantLevelForLevel` is self-normalizing (fractional hints used to
+  produce fractional levels; aligned with the test mirror).
+- A routed model whose explicit variant is unavailable now gets a fusion
+  variant (auto mode) instead of dispatching with none.
+- Rescue dispatches clear a pre-existing explicit variant ("rescue keeps the
+  target's default" now actually holds for the in-flight request).
+- ε-exploration never re-samples the computed pick (part of the exploration
+  budget was a no-op); `variantFixed` is trimmed in all three config paths;
+  the variant stats scan is paginated (was silently capped at 100 rows).
+
+### Fixed — config plumbing
+- Provider/crossProvider/chain transitions reset the model list in
+  **whitelist mode only** — blacklist exclusions are deliberate and survive
+  (the server previously dropped them, contradicting the TUI's promise).
+- Enabling `crossProvider` clears a stale provider chain (the chain silently
+  won routing otherwise).
+- `topologyPriorStrength` added to the `FusionConfig` type (was read/written
+  without being declared); invalid `reviewModel` strings clear to null
+  (aligned with `classifierModel`); persisted empty `providerID` rejected;
+  a restored chain mirrors `chain[0]` into `providerID` when stale; empty
+  `kinds` arrays rejected on restore; mixed `allowedTopologies` arrays are
+  filtered (not dropped wholesale) on update.
+
+### Fixed — reset hygiene
+- `/fusion-reset` now also clears the workflow/category session maps, both
+  tombstone maps, in-flight request bookkeeping and the event-side dedupe
+  markers (stale entries used to suppress re-creation and re-attribute
+  post-reset observations).
+
 ## [1.2.1] - 2026-11-19
 
 ### Added
