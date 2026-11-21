@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.2.3] - 2026-11-21
+
+### Fixed
+- **event-watch per-event isolation**: per-event try/catch in the
+  `session.step.failed` / `session.retry.scheduled` loop so one event's
+  exception no longer silently kills the subscription.
+- **`pending.set` / `pending.delete` ordering**: `pending.delete` before
+  `pending.set` to refresh insertion order; fixes dispatch observations
+  being deleted and `http.response` never recording latency/success/failure.
+- **request-time category propagation**: `http.request` now stores
+  `category: undefined` when unclassified; `http.response` uses
+  `observed.category || sessionCategory.get(...)` so unclassified turns
+  still record per-task stats.
+- **rescue claim/release balance**: prompt-hook pre-rescue and trailing
+  pass now claim/release so they cannot interleave with in-flight rescues.
+- **after-fail rescue attribution**: uses request-time `category` instead
+  of the current session category.
+- **stats scans paginated**: `STAT_PREFIX`, `FEEDBACK_PREFIX`,
+  `AUTO_PREFIX`, `TOPOLOGY_PREFIX` now page with offset like the variant
+  scan so high-cardinality installs do not drop rows.
+- **`recordTopologyAux` request-time hints**: planner timing is attributed
+  to the turn's shape/category instead of the live maps.
+- **catalog membership guards**: `Object.hasOwn(TOPOLOGY_CATALOG, t)`
+  in `recordTopologyPrior`, `topologyStatsSummary`,
+  `jevTopologyDistribution`, `selectTopology`, `bestTopologyOf`.
+- **`/fusion-provider` edit guard**: editing an entry to its own value is
+  a no-op instead of a duplicate error.
+- **`/fusion-modellist` `unchanged` check**: compares `mode === seedMode`
+  so a double mode-toggle back to the original preserves entries.
+- **`/fusion-reviewmodel` clear**: sends `null` to match the RPC contract.
+- **`/fusion-audit` alias**: back-compat alias for `/fusion-params`.
+- **config plumbing**: empty-string `providerID` rejected,
+  `providerID` mirrors `chain[0]` on restore, `listMode` transitions clear
+  `models` server-side, `reviewModel`/`classifierModel` trimmed,
+  `kinds` options validated element-by-element.
+- **variant/review**: `resetStats` review-key scan uses offset (no infinite
+  loop), variant-stats scan uses raw cursor, ε-exploration excludes the
+  final pick, messageID fallback includes model+offset, `upsertReviewTurn`
+  preserves original `at` timestamp, teardown clears
+  `lastEventFailure`/`verifyingNow`/`routeLog`.
+
 ## [1.2.2] - 2026-11-20
 
 ### Added

@@ -380,8 +380,9 @@ export default Plugin.define({
     const cfg: FusionConfig = {
       enabled: ctx.options.enabled === true,
       providerID:
-        typeof ctx.options.providerID === "string"
-          ? ctx.options.providerID
+        typeof ctx.options.providerID === "string" &&
+        ctx.options.providerID.trim() !== ""
+          ? ctx.options.providerID.trim()
           : "opencode",
       crossProvider: ctx.options.crossProvider === true,
       // v1.1.1: provider chain (priority-ordered fallback). Set via
@@ -419,8 +420,11 @@ export default Plugin.define({
           ? ctx.options.classifierModel
           : null,
       kinds:
-        Array.isArray(ctx.options.kinds) && ctx.options.kinds.length > 0
-          ? ctx.options.kinds
+        Array.isArray(ctx.options.kinds) &&
+        ctx.options.kinds.some((k) => typeof k === "string" && k.trim() !== "")
+          ? (ctx.options.kinds as unknown[]).filter(
+              (k): k is string => typeof k === "string" && k.trim() !== "",
+            )
           : ["primary"],
       models:
         Array.isArray(ctx.options.models) &&
@@ -495,7 +499,10 @@ export default Plugin.define({
     // crossProvider, and without an explicit options.providerID the primary
     // chain entry is the display/fallback provider.
     if (cfg.providerChain.length > 0) {
-      if (typeof ctx.options.providerID !== "string")
+      if (
+        typeof ctx.options.providerID !== "string" ||
+        !cfg.providerChain.includes(cfg.providerID)
+      )
         cfg.providerID = cfg.providerChain[0]
       cfg.crossProvider = false
     }
@@ -528,15 +535,10 @@ export default Plugin.define({
       // path prefers the chain; keep the flags mutually exclusive).
       if (cfg.providerChain.length > 0) {
         cfg.crossProvider = false
-        // v1.2.2 (audit, config #6): mirror chain[0] into providerID when the
-        // persisted providerID is absent/stale (the ctx.options init path
-        // does this; the restore path did not).
-        if (
-          typeof s.providerID !== "string" ||
-          s.providerID.length === 0 ||
-          !cfg.providerChain.includes(s.providerID)
-        )
-          cfg.providerID = cfg.providerChain[0]
+        // v1.2.2 (audit, config #6): a restored chain always mirrors its
+        // head into providerID, so the display/fallback provider tracks the
+        // chain head instead of a stale lower entry.
+        cfg.providerID = cfg.providerChain[0]
       }
       if (typeof s.exploreRate === "number")
         cfg.exploreRate = clamp(s.exploreRate, 0, 1)
@@ -557,15 +559,15 @@ export default Plugin.define({
         cfg.benchmarksFile = s.benchmarksFile
       if (typeof s.benchAutoUpdate === "boolean")
         cfg.benchAutoUpdate = s.benchAutoUpdate
-      if (typeof s.classifierModel === "string")
-        cfg.classifierModel = s.classifierModel.includes("/")
-          ? s.classifierModel
-          : null
+      if (typeof s.classifierModel === "string") {
+        const t = s.classifierModel.trim()
+        cfg.classifierModel = t.includes("/") ? t : null
+      }
       else if (s.classifierModel === null) cfg.classifierModel = null
-      if (typeof s.reviewModel === "string")
-        cfg.reviewModel = s.reviewModel.includes("/")
-          ? s.reviewModel
-          : null
+      if (typeof s.reviewModel === "string") {
+        const t = s.reviewModel.trim()
+        cfg.reviewModel = t.includes("/") ? t : null
+      }
       else if (s.reviewModel === null) cfg.reviewModel = null
       if (s.jevMode === "auto" || s.jevMode === "off") cfg.jevMode = s.jevMode
       if (s.topologyMode === "auto" || s.topologyMode === "fixed")
@@ -852,6 +854,7 @@ export default Plugin.define({
     // --- Rescue restore ---
     // When a session fell back to another model via rescue, record it so the
     // original model can be automatically restored on the next prompt once its cooldown lifts.
+    const TOMBSTONE_TTL_MS = 25 * 60 * 60_000 // moved up (audit: TDZ fragility)
     const rescueAttempts = new Map<string, { originalRef: string; deadline: number }>()
     const RESCUE_WINDOW_MS = 24 * 60 * 60_000 // valid for 24 hours only
 
@@ -874,6 +877,18 @@ export default Plugin.define({
       }
       for (const [sessionID, entry] of rescueAttempts)
         if (entry.deadline > now) attempts[sessionID] = entry
+      // v1.2.2 (audit, rescue): bound the in-memory map too (oldest-first
+      // eviction past 256 entries) — it used to grow unbounded across
+      // long-running processes with many sessions.
+      if (rescueAttempts.size > 256) {
+        for (const [sid, e] of rescueAttempts)
+          if (e.deadline <= now) rescueAttempts.delete(sid)
+        while (rescueAttempts.size > 256) {
+          const oldest = rescueAttempts.keys().next().value
+          if (!oldest) break
+          rescueAttempts.delete(oldest)
+        }
+      }
       const tnow = Date.now()
       for (const [sid, ts] of rescueTombstones) {
         if (tnow - ts > TOMBSTONE_TTL_MS) {
@@ -934,7 +949,6 @@ export default Plugin.define({
     // Therefore persist is a "merge memory onto the kv" scheme.
     // Deletes go through a tombstone (so clearCooldown's success-time delete cannot resurrect).
     const cooldownTombstones = new Map<string, number>()
-    const TOMBSTONE_TTL_MS = 25 * 60 * 60_000
     const tomb = (key: string) => {
       cooldownTombstones.set(key, Date.now())
       if (cooldownTombstones.size > 500) {
@@ -1271,6 +1285,11 @@ export default Plugin.define({
       resetAttemptFailures(sessionID, ref)
       lastHttpFailure.delete(sessionID)
       lastEventFailure.delete(sessionID)
+      rescueAttempts.set(sessionID, {
+        originalRef: ref,
+        deadline: Date.now() + RESCUE_WINDOW_MS,
+      })
+      void persistRescue()
     }
 
     // Record the attempt and decide whether the budget is exhausted. The gate
@@ -1357,8 +1376,17 @@ export default Plugin.define({
             )
           }
         } catch (error) {
+          // v1.2.2 (audit F10): re-fetch the entry — clearCooldown (or a
+          // reset) may have deleted it while the probe was in flight; the
+          // captured object must not resurrect a dead cooldown via
+          // entry.until + persistCooldowns.
+          const live = cooldowns.get(ref)
+          if (!live) {
+            logRoute(`VERIFY skip ${ref} (cooldown already cleared)`)
+            return
+          }
           // Still unavailable: extend by 1 hour, keeping the verification state
-          entry.until = Date.now() + QUOTA_COOLDOWN_MS
+          live.until = Date.now() + QUOTA_COOLDOWN_MS
           logRoute(
             `VERIFY fail ${ref}: ${String(error).slice(0, 60).replace(/\n/g, " ")} (+1h)`,
           )
@@ -1386,6 +1414,7 @@ export default Plugin.define({
           if (typeof sid !== "string") continue
           const isRetry = event.type === "session.retry.scheduled"
           const message: string = event.data?.error?.message ?? ""
+          try {
           const match = /^Model unavailable:\s*(\S+)/.exec(message)
           // v1.2.2 (audit F12): broaden definitive detection — a failure
           // whose message indicates the model does not exist cannot be
@@ -1559,6 +1588,10 @@ export default Plugin.define({
             } finally {
               releaseRescue(sid)
             }
+          }
+          } catch (error) {
+            logRoute(`EVENT error: ${String(error).slice(0, 80)}`)
+            console.log(`[adaptive-fusion] event watch iteration failed: ${error}`)
           }
         }
       } catch {
@@ -2277,7 +2310,7 @@ export default Plugin.define({
         // nothing. Falls back to the full list only for single-variant
         // catalogs (unreachable here: ids.length >= 2).
         if (Math.random() < clamp(cfg.variantExploreRate, 0, 1)) {
-          const pool = ranked.filter((r) => r.i !== computedIdx)
+          const pool = ranked.filter((r) => r.i !== ranked[pos].i)
           const source = pool.length > 0 ? pool : ranked
           const pick = source[Math.floor(Math.random() * source.length)]
           return { variant: pick.id, note: "explore" }
@@ -2428,7 +2461,9 @@ export default Plugin.define({
       turns[messageID] = {
         topology: patch.topology ?? existing?.topology ?? "single",
         category: patch.category ?? existing?.category ?? "",
-        at: Date.now(),
+        // v1.2.2 (audit, review): preserve the original turn timestamp when
+        // the entry already exists; only stamp on first creation.
+        at: existing?.at ?? Date.now(),
         ...(existing?.rating !== undefined ? { rating: existing.rating } : {}),
         ...(patch.rating !== undefined ? { rating: patch.rating } : {}),
         ...(existing?.topologyRating !== undefined
@@ -2505,8 +2540,8 @@ export default Plugin.define({
     ) => {
       try {
         const topology =
-          topologyHint ?? sessionTopology.get(sessionID) ?? "single"
-        const category = categoryHint ?? sessionCategory.get(sessionID)
+          topologyHint ?? "single"
+        const category = categoryHint
         const global = (await loadTopologyStat(TOPOLOGY_PREFIX + topology)) ??
           emptyTopologyStat(topology)
         global.count += 1
@@ -2540,8 +2575,8 @@ export default Plugin.define({
     ) => {
       try {
         const topology =
-          topologyHint ?? sessionTopology.get(sessionID) ?? "single"
-        const category = categoryHint ?? sessionCategory.get(sessionID)
+          topologyHint ?? "single"
+        const category = categoryHint
         const apply = (stat: TopologyStat) => {
           stat.sumQuality += quality
           stat.qualityCount += 1
@@ -2604,6 +2639,7 @@ export default Plugin.define({
       const entries = Object.entries(probabilities).filter(
         (e): e is [string, number] =>
           cfg.allowedTopologies.includes(e[0]) &&
+          (e[0] in TOPOLOGY_CATALOG) &&
           typeof e[1] === "number" &&
           Number.isFinite(e[1]) &&
           // v1.2.2 (audit, topology #13): zero probabilities are skipped —
@@ -2637,10 +2673,15 @@ export default Plugin.define({
     }
     // Add the duration of auxiliary calls (planner, etc.) to the topology stats.
     // Kept in auxCalls/auxMs to distinguish from the main response's totalMs.
-    const recordTopologyAux = async (sessionID: string, ms: number) => {
+    const recordTopologyAux = async (
+      sessionID: string,
+      ms: number,
+      topologyHint?: string,
+      categoryHint?: string,
+    ) => {
       try {
-        const topology = sessionTopology.get(sessionID) ?? "single"
-        const category = sessionCategory.get(sessionID)
+        const topology = topologyHint ?? "single"
+        const category = categoryHint
         const apply = (stat: TopologyStat) => {
           stat.auxCalls += 1
           stat.auxMs += ms
@@ -2825,23 +2866,22 @@ export default Plugin.define({
     // Probability distribution from a Jev Choice answer restricted to the
     // allowed topologies. Falls back to one-hot on the chosen choice (or a
     // uniform distribution) when probabilities are missing/garbled.
+    // Return undefined for an all-zero (or empty) probability map so the
+    // caller falls back to the task-shape prior — consistent with the
+    // zero-skip intent in recordTopologyPrior.
     const jevTopologyDistribution = (
       probabilities: Record<string, number> | undefined,
       choice: string | undefined,
-    ): Record<string, number> => {
+    ): Record<string, number> | undefined => {
+      if (!probabilities || typeof probabilities !== "object") return undefined
       const filtered: Record<string, number> = {}
       for (const t of cfg.allowedTopologies) {
-        if (!(t in TOPOLOGY_CATALOG)) continue
+        if (!Object.hasOwn(TOPOLOGY_CATALOG, t)) continue
         const v = probabilities?.[t]
-        if (typeof v === "number" && Number.isFinite(v) && v > 0) filtered[t] = v
+        if (typeof v === "number" && Number.isFinite(v) && v > 0)
+          filtered[t] = v
       }
-      if (Object.keys(filtered).length === 0) {
-        for (const t of cfg.allowedTopologies)
-          if (t in TOPOLOGY_CATALOG) filtered[t] = 1
-        if (choice && choice in filtered) {
-          for (const t of Object.keys(filtered)) filtered[t] = t === choice ? 1 : 0
-        }
-      }
+      if (Object.keys(filtered).length === 0) return undefined
       return normalizeTopologyWeights(filtered)
     }
     // Blend two distributions: (1 - wJev) * heuristic + wJev * jev.
@@ -2858,16 +2898,31 @@ export default Plugin.define({
       return normalizeTopologyWeights(out)
     }
     const bestTopologyOf = (p: Record<string, number>): string => {
-      // v1.2.2 (audit, topology #10): no implicit "single wins ties" — the
-      // first maximal entry in distribution order wins, so the blend (not a
-      // hidden simplest-shape preference) decides.
+      // v1.2.2 (audit, topology): ties no longer silently favor `single`.
+      // `single` is tried last so a tie goes to a non-single shape when one
+      // is present (the blend, not a hidden simplest-shape preference,
+      // decides).
+      const order = cfg.allowedTopologies.includes("single")
+        ? [...cfg.allowedTopologies.filter((t) => t !== "single"), "single"]
+        : [...cfg.allowedTopologies]
       let best: string | undefined
       let bestP = -1
-      for (const [t, v] of Object.entries(p)) {
+      for (const t of order) {
+        const v = p[t]
+        if (v === undefined) continue
         if (t === "sequential-chain" && cfg.maxTopologyCalls < 2) continue
         if (v > bestP) {
           bestP = v
           best = t
+        }
+      }
+      if (!best) {
+        for (const [t, v] of Object.entries(p)) {
+          if (t === "sequential-chain" && cfg.maxTopologyCalls < 2) continue
+          if (v > bestP) {
+            bestP = v
+            best = t
+          }
         }
       }
       return best ?? "single"
@@ -2987,9 +3042,9 @@ export default Plugin.define({
               typeof answer.confidence === "number"
                 ? answer.confidence
                 : undefined
-            if (conf !== undefined && conf < 0.7) {
+            if (!(typeof conf === "number" && Number.isFinite(conf) && conf >= 0.7)) {
               logRoute(
-                `TOPOLOGY jev ${answer.choice} low conf ${conf.toFixed(2)} -> task-shape prior`,
+                `TOPOLOGY jev ${answer.choice} low conf ${conf?.toFixed?.(2) ?? "?"} -> task-shape prior`,
               )
             } else {
               // Record the probability distribution as the topology prior (used for the w1 combination of D-4)
@@ -3231,6 +3286,7 @@ export default Plugin.define({
           .trim()
       }
       const turnList = groupReviewTurns(context, messageText, userTextOf)
+      if (!Array.isArray(turnList) || offset < 0 || offset >= turnList.length) return undefined
       const entry = turnList[offset]
       const assistant = entry?.assistant
       if (!assistant) return undefined
@@ -3246,7 +3302,7 @@ export default Plugin.define({
       const messageID =
         rawID !== ""
           ? rawID
-          : `no-id:${String((assistant as any)?.time?.created ?? "")}`
+          : `no-id:${String((assistant as any)?.time?.created ?? "")}:${String((assistant as any)?.model ?? "")}:${String(offset)}`
       const meta = turnsMeta[messageID]
       // v1.1.1: per-turn topology/category. For the latest turn (offset 0) the
       // session maps still hold this turn's values — record them so later
@@ -3527,6 +3583,11 @@ export default Plugin.define({
       const jev = jevClient()
       let effortHint: number | undefined
       if (jev) {
+        // v1.2.2 (audit, workflow #3): the whole Jev classification block is
+        // exception-safe — a malformed-but-200 payload (or a toFixed throw)
+        // used to abort classify() and leave sessionCategory/sessionTopology
+        // stale, skipping the legacy fallback entirely.
+        try {
         const answers = await jev.ask(text.slice(0, 1000), {
           category: {
             type: "choice",
@@ -3584,6 +3645,8 @@ export default Plugin.define({
         }
         if (
           catAnswer?.type === "choice" &&
+          typeof catAnswer.confidence === "number" &&
+          Number.isFinite(catAnswer.confidence) &&
           catAnswer.confidence >= 0.5 &&
           categories.includes(catAnswer.choice)
         ) {
@@ -3593,9 +3656,14 @@ export default Plugin.define({
           )
         } else if (catAnswer?.type === "choice") {
           logRoute(
-            `CLASSIFY jev low conf ${catAnswer.confidence.toFixed(2)} -> fallback`,
+            `CLASSIFY jev low conf ${catAnswer.confidence?.toFixed?.(2) ?? "?"} -> fallback`,
           )
         }
+      } catch (error) {
+        logRoute(
+          `CLASSIFY jev error ${String(error).slice(0, 60)} -> fallback`,
+        )
+      }
       }
 
       // --- Legacy path (LLM -> keyword estimation). Skipped when Jev succeeds ---
@@ -3787,6 +3855,12 @@ export default Plugin.define({
             } catch (error) {
               logRoute(`RESCUE restore failed ${sessionID}: ${error}`)
             }
+          } else if (restored && restored.ref === currentRef) {
+            // v1.2.2 (audit, rescue): already on the original — drop the
+            // ticket so we stop re-evaluating the restore every prompt.
+            rescueAttempts.delete(sessionID)
+            rescueTombstones.set(sessionID, Date.now())
+            void persistRescue()
           }
         }
         if (!model?.providerID || !model?.id) {
@@ -3891,6 +3965,9 @@ export default Plugin.define({
     ): Promise<boolean> => {
       if (!cfg.enabled || !cfg.chainPromote) return false
       if (cfg.providerChain.length < 2) return false
+      // v1.2.2 (audit, rescue): claim the switch right so an in-flight
+      // rescue (http.response/event) cannot interleave a second switch.
+      if (!tryClaimRescue(sessionID, true)) return false
       try {
         const session: any = await ctx.session.get({ sessionID })
         let model = session?.model
@@ -3962,6 +4039,8 @@ export default Plugin.define({
       } catch (error) {
         logRoute(`PROMOTE error: ${String(error).slice(0, 80)}`)
         return false
+      } finally {
+        releaseRescue(sessionID)
       }
     }
 
@@ -4012,13 +4091,18 @@ export default Plugin.define({
       } catch {
         // Promotion failure does not block normal processing
       }
-      try {
-        await switchSessionIfCooling(
-          event.sessionID,
-          sessionCategory.get(event.sessionID) ?? undefined,
-        )
-      } catch {
-        // Pre-rescue failure does not block normal processing (double safety net; also caught internally)
+      // v1.2.2 (audit, rescue): the pre-prompt rescue pass must claim its
+      // switch like every other site — otherwise it can interleave with an
+      // in-flight rescue from http.response/event.
+      if (tryClaimRescue(event.sessionID)) {
+        try {
+          await switchSessionIfCooling(
+            event.sessionID,
+            sessionCategory.get(event.sessionID) ?? undefined,
+          )
+        } finally {
+          releaseRescue(event.sessionID)
+        }
       }
     })
 
@@ -4118,7 +4202,7 @@ export default Plugin.define({
             const oldest = chainPlans.keys().next().value
             if (oldest) chainPlans.delete(oldest)
           }
-          await recordTopologyAux(sessionID, planner.ms)
+          await recordTopologyAux(sessionID, planner.ms, sessionTopology.get(sessionID), sessionCategory.get(sessionID))
           logRoute(
             `CHAIN plan injected (${Math.round(planner.ms)} ms, ${planner.plan.length} chars, planner ${planner.model || "-"})`,
           )
@@ -4356,7 +4440,7 @@ export default Plugin.define({
           .trim()
           .split("\n")[0]
           .slice(0, 200)
-        const category = sessionCategory.get(sessionID)
+        const category = categoryHint ?? sessionCategory.get(sessionID)
         const ref = refFor(target.providerID, target.modelID)
         const persist = async (existing?: AutoReviewStat): Promise<AutoReviewStat> => {
           const stat: AutoReviewStat = existing ?? {
@@ -4493,17 +4577,24 @@ export default Plugin.define({
 
     await ctx.session.hook("http.request", (event) => {
       if (!kinds.includes(event.kind)) return
+      // v1.2.2 (audit, routing): guard against a missing model — the
+      // pending bookkeeping only makes sense for a dispatch that actually
+      // has one.
+      if (!event?.model?.id || !event?.model?.providerID) return
       // v1.0: passive observation (learning) keeps running while OFF.
       // Record providers other than the target too (for assessing rescue-target health).
       // crossProvider decisions happen in the resolve hook.
+      pending.delete(event.sessionID)
       pending.set(event.sessionID, {
         start: performance.now(),
         modelID: event.model.id,
         providerID: event.model.providerID,
         // v1.1: dispatched variant (for per-(model,variant) outcome learning)
         variant: event.model?.variant,
-        // v1.2.2: request-time workflow shape/category (see the type note)
-        topology: sessionTopology.get(event.sessionID),
+        // v1.2.2 (audit, workflow #4b): capture resolved values at request
+        // time so a later prompt cannot overwrite the attribution with the
+        // next turn's shape/category.
+        topology: sessionTopology.get(event.sessionID) ?? "single",
         category: sessionCategory.get(event.sessionID),
       })
       // v1.2.2 (audit, routing #9): bound the map like the other per-session
@@ -4529,7 +4620,10 @@ export default Plugin.define({
       const ref = refFor(observed.providerID, observed.modelID)
       const ms = performance.now() - observed.start
       const ok = event.response.ok
-      const category = sessionCategory.get(event.sessionID)
+      // v1.2.2 (audit, workflow #4): attribute to the turn captured at
+      // request time, not the session's current category (which the next
+      // prompt may have overwritten).
+      const category = observed.category || sessionCategory.get(event.sessionID)
 
       if (ok) {
         // Successful observations lift the cooldown (recovery from temporary unavailability).
@@ -4545,6 +4639,9 @@ export default Plugin.define({
         // gate on its next single failure.
         resetSessionAttempts(event.sessionID)
         lastHttpFailure.delete(event.sessionID)
+        // v1.2.2 (audit, rescue): event-side dedupe marker cleared too,
+        // otherwise a later quota event for the same attempt is suppressed.
+        lastEventFailure.delete(event.sessionID)
         // v1.1: per-(model,variant) outcome learning
         recordVariantOutcome(
           observed.providerID,
@@ -4590,7 +4687,7 @@ export default Plugin.define({
         // the failure count and the cooldown extension.
         const ev = lastEventFailure.get(event.sessionID)
         const seenViaEvent =
-          ev?.ref === ref && Date.now() - ev.at <= ATTEMPT_RACE_MS * 5
+          ev?.ref === ref && Date.now() - ev.at <= ATTEMPT_WINDOW_MS
         if (!seenViaEvent) markFailure(ref, "quota")
         // v1.2.2 (audit F2/variant #4): quota outcomes feed the per-variant
         // bandit too (a variant whose requests die on quota is not "ok").
@@ -4646,7 +4743,7 @@ export default Plugin.define({
       if (cfg.enabled && tryClaimRescue(sid)) {
         try {
           const targetRef = ref
-          const currentCategory = sessionCategory.get(sid)
+           const currentCategory = category
           const choice = await pick(targetRef, currentCategory, true, sid)
           if (choice) {
             const nextRef = refFor(choice.providerID, choice.id)
@@ -4681,10 +4778,16 @@ export default Plugin.define({
           releaseRescue(sid)
         }
       }
-      // v1.2.2 (audit, routing #4): the trailing pre-prompt pass is now
-      // suppression-guarded inside switchSessionIfCooling, so it no-ops when
-      // the claimed block above already switched.
-      void switchSessionIfCooling(sid, category)
+      // v1.2.2 (audit, rescue): claim the trailing pass too so it cannot
+      // interleave with an in-flight rescue (http.response/event/promote).
+      void (async () => {
+        if (!tryClaimRescue(sid)) return
+        try {
+          await switchSessionIfCooling(sid, category)
+        } finally {
+          releaseRescue(sid)
+        }
+      })()
       } catch (error) {
         logRoute(`HTTP error: ${String(error).slice(0, 80)}`)
         console.log(`[adaptive-fusion] http.response failed: ${error}`)
@@ -5274,7 +5377,7 @@ export default Plugin.define({
           // site — the resolve hook used to switch without the suppression
           // window or the claim, so a concurrent http.response/event rescue
           // could interleave a second switch.
-          if (!tryClaimRescue(event.sessionID, true)) return
+          if (!tryClaimRescue(event.sessionID, false)) return
           try {
             await ctx.session.switchModel({
               sessionID: event.sessionID,
@@ -5303,7 +5406,7 @@ export default Plugin.define({
       if (rescue) {
         // v1.2.2 (audit, routing #1/#2): claim + mark (see the same-provider
         // block above).
-        if (!tryClaimRescue(event.sessionID, true)) return
+        if (!tryClaimRescue(event.sessionID, false)) return
         try {
           await ctx.session.switchModel({
             sessionID: event.sessionID,
@@ -5964,9 +6067,18 @@ export default Plugin.define({
           ),
         )
 
-      const page = await ctx.storage.scan({ prefix: STAT_PREFIX, limit: 100 })
+      const statEntries: any[] = []
+      {
+        let _off = 0
+        for (;;) {
+          const _p = await ctx.storage.scan({ prefix: STAT_PREFIX, limit: 100, offset: _off })
+          statEntries.push(..._p.entries)
+          _off += _p.entries.length
+          if (_p.entries.length < 100) break
+        }
+      }
       lines.push(tr("全体統計", "Overall statistics"))
-      for (const entry of page.entries) {
+      for (const entry of statEntries) {
         const stat = entry.value as Stat
         const n = stat.success + stat.failure
         const rate = n > 0 ? ((stat.success / n) * 100).toFixed(0) : "-"
@@ -5975,23 +6087,25 @@ export default Plugin.define({
           `- ${refFor(stat.model.providerID, stat.model.id)}: ${n} req / ok ${rate}% / avg ${avg} ms`,
         )
       }
-      if (page.entries.length === 0)
+      if (statEntries.length === 0)
         lines.push(tr("(データなし)", "(no data)"))
 
       // v1.1: per-(model,variant) outcome learning (variantMode auto)
       // v1.2.2 (audit, variant #11): paginated like the other scans — the
       // 100-entry cap silently dropped rows in high-cardinality setups.
       const variantEntries: VariantStat[] = []
+      let variantOffset = 0
       for (;;) {
         const variantPage = await ctx.storage.scan({
           prefix: VARIANT_PREFIX,
           limit: 100,
-          offset: variantEntries.length,
+          offset: variantOffset,
         })
         for (const entry of variantPage.entries) {
           const s = entry.value as VariantStat
           if (s && s.count > 0) variantEntries.push(s)
         }
+        variantOffset += variantPage.entries.length
         if (variantPage.entries.length < 100) break
       }
       if (variantEntries.length > 0) {
@@ -6015,10 +6129,17 @@ export default Plugin.define({
           lines.push(tr("(観測なし — ε探索を待機中)", "(no observations — waiting for ε exploration)"))
       }
 
-      const feedbackPage = await ctx.storage.scan({
-        prefix: FEEDBACK_PREFIX,
-        limit: 100,
-      })
+      const feedbackEntries: any[] = []
+      {
+        let _off = 0
+        for (;;) {
+          const _p = await ctx.storage.scan({ prefix: FEEDBACK_PREFIX, limit: 100, offset: _off })
+          feedbackEntries.push(..._p.entries)
+          _off += _p.entries.length
+          if (_p.entries.length < 100) break
+        }
+      }
+      const feedbackPage = { entries: feedbackEntries }
       const globalFeedbackEntries = feedbackPage.entries.filter(
         (entry) => !entry.key.startsWith(TASK_FEEDBACK_PREFIX),
       )
@@ -6033,10 +6154,17 @@ export default Plugin.define({
         }
       }
 
-      const autoPage = await ctx.storage.scan({
-        prefix: AUTO_PREFIX,
-        limit: 100,
-      })
+      const autoEntries: any[] = []
+      {
+        let _off = 0
+        for (;;) {
+          const _p = await ctx.storage.scan({ prefix: AUTO_PREFIX, limit: 100, offset: _off })
+          autoEntries.push(..._p.entries)
+          _off += _p.entries.length
+          if (_p.entries.length < 100) break
+        }
+      }
+      const autoPage = { entries: autoEntries }
       const globalAutoEntries = autoPage.entries.filter(
         (entry) => !entry.key.startsWith(TASK_AUTO_PREFIX),
       )
@@ -6117,10 +6245,17 @@ export default Plugin.define({
       }
 
       // Topology observation (v0.7a): execution results per judged shape
-      const topologyPage = await ctx.storage.scan({
-        prefix: TOPOLOGY_PREFIX,
-        limit: 100,
-      })
+      const topologyEntriesAll: any[] = []
+      {
+        let _off = 0
+        for (;;) {
+          const _p = await ctx.storage.scan({ prefix: TOPOLOGY_PREFIX, limit: 100, offset: _off })
+          topologyEntriesAll.push(..._p.entries)
+          _off += _p.entries.length
+          if (_p.entries.length < 100) break
+        }
+      }
+      const topologyPage = { entries: topologyEntriesAll }
       const topologyEntries = topologyPage.entries.filter(
         (entry) => !entry.key.startsWith(TASK_TOPOLOGY_PREFIX),
       )
@@ -6313,10 +6448,12 @@ export default Plugin.define({
       // (統計リセット後は各ターンを再度評価できるようにする。分類の割当て自体は残す)
       try {
         // v1.1.1: page through every review record (>500 sessions left residue)
-        for (;;) {
+          let reviewOffset = 0
+          for (;;) {
           const reviewPage = await ctx.storage.scan({
             prefix: REVIEW_PREFIX,
             limit: 500,
+            offset: reviewOffset,
           })
           for (const entry of reviewPage.entries) {
             const value = entry.value as Record<string, unknown>
@@ -6325,6 +6462,7 @@ export default Plugin.define({
             const { turns: _drop, ...rest } = value
             await ctx.storage.set(entry.key, rest)
           }
+            reviewOffset += reviewPage.entries.length
           if (reviewPage.entries.length < 500) break
         }
       } catch {
@@ -6495,8 +6633,8 @@ export default Plugin.define({
         cfg.kinds.push(...(update.kinds as string[]))
       }
       if (typeof update.classifierModel === "string") {
-        cfg.classifierModel =
-          update.classifierModel.includes("/") ? update.classifierModel : null
+        const t = update.classifierModel.trim()
+        cfg.classifierModel = t.includes("/") ? t : null
       }
       // v1.1.1: explicit null clears (mirrors variantFixed)
       if (update.classifierModel === null) cfg.classifierModel = null
@@ -6505,16 +6643,21 @@ export default Plugin.define({
         // v1.2.2 (audit, config #4): aligned with classifierModel — an
         // invalid non-empty string (no slash) now clears instead of being
         // silently ignored.
-        cfg.reviewModel = update.reviewModel.includes("/")
-          ? update.reviewModel
-          : null
+        const _t = update.reviewModel.trim()
+        cfg.reviewModel = _t.includes("/") ? _t : null
       }
       if (update.reviewModel === null) cfg.reviewModel = null
       if (Array.isArray(update.models) && update.models.every((m) => typeof m === "string"))
         cfg.models = update.models as string[]
       // v1.1.1: whitelist/blacklist interpretation of the model list
-      if (update.listMode === "whitelist" || update.listMode === "blacklist")
+      if (update.listMode === "whitelist" || update.listMode === "blacklist") {
+        const changing = update.listMode !== cfg.listMode
         cfg.listMode = update.listMode
+        // v1.2.2 (audit, config): a server-side listMode transition whose
+        // models are not explicitly provided must clear the list, otherwise
+        // whitelist entries invert their meaning (TUI clears client-side).
+        if (changing && !Array.isArray(update.models)) cfg.models = []
+      }
       // Display language (v0.9.0). Default per install is options.lang,
       // but the switch with /fusion-lang is persisted and reflected in later display.
       if (update.lang === "ja" || update.lang === "en") cfg.lang = update.lang
@@ -6623,10 +6766,13 @@ export default Plugin.define({
       sessionEffort.clear()
       attemptFailures.clear()
       lastHttpFailure.clear()
+      lastEventFailure.clear()
       rescueSwitchedAt.clear()
       rescueInFlight.clear()
+      verifyingNow.clear()
       chainPending.clear()
       chainPlans.clear()
+      routeLog.length = 0
     }
   },
 })

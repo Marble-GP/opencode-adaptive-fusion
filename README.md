@@ -83,7 +83,7 @@ Install the plugin straight from this repository (the repository root is the
 plugin package; its `package.json` maps `exports` into `plugins/adaptive-fusion/`):
 
 ```bash
-opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.2.2'
+opencode plugin add 'github:Marble-GP/opencode-adaptive-fusion#v1.2.3'
 ```
 
 OpenCode installs it into the **global** plugin configuration. Verify and manage it with:

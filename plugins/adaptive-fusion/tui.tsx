@@ -1168,7 +1168,7 @@ export default Plugin.define({
         }
 
         const unchanged =
-          !modeToggled &&
+          mode === seedMode &&
           JSON.stringify(list) === JSON.stringify(seedList)
         if (unchanged) return
         const result = await fusion.config(
@@ -1302,6 +1302,16 @@ export default Plugin.define({
           run: () => fusionParamsDialog(),
         },
         {
+          // v1.2.2: back-compat alias for the former /fusion-audit (merged into /fusion-params).
+          id: "fusion.audit",
+          title: tr(
+            "adaptive-fusion: �č�/�d�݌W������ (/fusion-params �Ɠ���)",
+            "adaptive-fusion: audit/weight tuning (same as /fusion-params)",
+          ),
+          slash: { name: "fusion-audit" },
+          run: () => fusionParamsDialog(),
+        },
+        {
           id: "fusion.reviewmodel",
           title: tr("adaptive-fusion: 内部審査(shadow)の担当モデルを設定", "adaptive-fusion: set the shadow auto-review model"),
           slash: { name: "fusion-reviewmodel" },
@@ -1324,7 +1334,7 @@ export default Plugin.define({
                 return
               }
               const result = await fusion.config(
-                { update: { reviewModel: reviewModel === "" ? "" : reviewModel } },
+                { update: { reviewModel: reviewModel === "" ? null : reviewModel } },
                 { location: location() },
               )
               context.ui.toast.show({
@@ -1690,7 +1700,7 @@ export default Plugin.define({
                 if (input === undefined) return
                 const id = input.trim()
                 if (id.length === 0) return
-                if (chain.includes(id)) {
+                if (chain.includes(id) && chain.indexOf(id) !== index) {
                   context.ui.toast.show({
                     message: tr(
                       `${id} は既にチェーンに含まれています`,
